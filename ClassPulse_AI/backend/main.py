@@ -400,3 +400,62 @@ Answer the question accurately based solely on the conversation transcript above
         }
     except Exception as e:
         return {"error": f"Ask AI failed: {str(e)}"}
+    @app.get("/rooms/{room_id}/students")
+def get_student_analytics(room_id: str):
+    db = SessionLocal()
+    try:
+        messages = db.query(MessageRecord).filter(MessageRecord.room_id == room_id).all()
+        votes = db.query(VoteRecord).all()
+
+        student_data = {}
+
+        # Aggregate messages
+        for msg in messages:
+            if msg.username == "Anonymous" or not msg.username:
+                continue
+            if msg.username not in student_data:
+                student_data[msg.username] = {
+                    "username": msg.username,
+                    "message_count": 0,
+                    "questions_asked": [],
+                    "voted": False,
+                    "last_active": msg.timestamp.isoformat(),
+                }
+            student_data[msg.username]["message_count"] += 1
+            student_data[msg.username]["last_active"] = msg.timestamp.isoformat()
+            if "?" in msg.message:
+                student_data[msg.username]["questions_asked"].append(msg.message)
+
+        # Aggregate votes
+        for v in votes:
+            if v.username in student_data:
+                student_data[v.username]["voted"] = True
+            elif v.username != "Anonymous":
+                student_data[v.username] = {
+                    "username": v.username,
+                    "message_count": 0,
+                    "questions_asked": [],
+                    "voted": True,
+                    "last_active": v.timestamp.isoformat(),
+                }
+
+        # Calculate status & badges
+        students_list = []
+        for s in student_data.values():
+            badge = "Observer"
+            if len(s["questions_asked"]) >= 2:
+                badge = "Inquisitive"
+            elif s["message_count"] >= 3:
+                badge = "Highly Active"
+            elif s["voted"]:
+                badge = "Engaged Voter"
+
+            students_list.append({**s, "badge": badge})
+
+        return {
+            "room_id": room_id,
+            "students": sorted(students_list, key=lambda x: x["message_count"], reverse=True),
+            "total_tracked": len(students_list),
+        }
+    finally:
+        db.close()

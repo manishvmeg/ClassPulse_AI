@@ -45,6 +45,15 @@ interface PollData {
   total_votes: number;
 }
 
+interface StudentMetric {
+  username: string;
+  message_count: number;
+  questions_asked: string[];
+  voted: boolean;
+  badge: string;
+  last_active: string;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState("Overview");
   const [loading, setLoading] = useState(false);
@@ -82,6 +91,9 @@ export default function Home() {
   // Session Report State
   const [report, setReport] = useState<SessionReport | null>(null);
   const [generatingReport, setGeneratingReport] = useState(false);
+
+  // Student Analytics State
+  const [students, setStudents] = useState<StudentMetric[]>([]);
 
   // Trigger real-time AI analysis from FastAPI backend
   const handleAnalyze = useCallback(async () => {
@@ -126,20 +138,36 @@ export default function Home() {
     }
   }, [roomId]);
 
+  // Fetch student engagement data
+  const fetchStudents = useCallback(async () => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/students`);
+      const data = await res.json();
+      if (data.students) {
+        setStudents(data.students);
+      }
+    } catch (err) {
+      console.error("Failed to fetch student analytics:", err);
+    }
+  }, [roomId]);
+
+  useEffect(() => {
+    if (activeTab === "Students") {
+      fetchStudents();
+    }
+  }, [activeTab, fetchStudents]);
+
   // Connect to WebSocket room
   useEffect(() => {
     fetchActivePoll();
     const ws = new WebSocket(`ws://127.0.0.1:8000/ws/${roomId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      setWsConnected(true);
-    };
+    ws.onopen = () => setWsConnected(true);
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-
         if (data.type === "poll_created" || data.type === "poll_update") {
           setActivePoll(data.poll);
         } else {
@@ -153,9 +181,7 @@ export default function Home() {
       }
     };
 
-    ws.onclose = () => {
-      setWsConnected(false);
-    };
+    ws.onclose = () => setWsConnected(false);
 
     return () => {
       ws.close();
@@ -460,7 +486,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
           {/* TAB 1: OVERVIEW */}
           {activeTab === "Overview" && (
             <>
-              {/* Quick Metrics */}
               <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-xl border border-slate-800 bg-slate-900 p-5">
                   <p className="text-sm text-slate-400">Active Room</p>
@@ -495,7 +520,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                 </div>
               </div>
 
-              {/* Detailed Intelligence Cards */}
               <div className="mt-6 grid gap-6 lg:grid-cols-2">
                 <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
                   <h3 className="text-xl font-semibold">Top Student Concerns</h3>
@@ -549,7 +573,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                 </div>
               </div>
 
-              {/* Unanswered & Key Questions */}
               <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900 p-6">
                 <h3 className="text-xl font-semibold">Important Unanswered Questions</h3>
                 <div className="mt-4 space-y-2">
@@ -573,7 +596,7 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
             </>
           )}
 
-          {/* TAB 2: LIVE CLASS (CHAT SIMULATOR) */}
+          {/* TAB 2: LIVE CLASS */}
           {activeTab === "Live Class" && (
             <div className="grid gap-6 lg:grid-cols-3">
               <div className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-900 p-6 flex flex-col h-[600px]">
@@ -582,7 +605,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                   Incoming WebSocket messages for {roomId.toUpperCase()}
                 </p>
 
-                {/* Message Log */}
                 <div className="flex-1 overflow-y-auto space-y-3 pr-2 border border-slate-800/80 rounded-lg p-4 bg-slate-950/50">
                   {messages.length === 0 ? (
                     <p className="text-sm text-slate-500 italic text-center mt-10">
@@ -611,7 +633,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                   )}
                 </div>
 
-                {/* Send Message Form */}
                 <form onSubmit={handleSendMessage} className="mt-4 flex gap-3">
                   <select
                     value={inputUser}
@@ -642,7 +663,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                 </form>
               </div>
 
-              {/* Quick Info Panel */}
               <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 flex flex-col justify-between">
                 <div>
                   <h3 className="text-lg font-semibold">Live Class Guide</h3>
@@ -650,7 +670,7 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                     <li>Enable <strong>Auto AI Pulse</strong> above for continuous intelligence.</li>
                     <li>Simulate student queries from different usernames.</li>
                     <li>Launch quick comprehension polls in the <strong>Polls</strong> tab.</li>
-                    <li>Generate an end-of-lecture digest in the <strong>Reports</strong> tab.</li>
+                    <li>Check individual student metrics in the <strong>Students</strong> tab.</li>
                   </ol>
                 </div>
 
@@ -665,7 +685,7 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
             </div>
           )}
 
-          {/* TAB 3: QUESTIONS (ASK CLASSPULSE AI COPILOT) */}
+          {/* TAB 3: QUESTIONS */}
           {activeTab === "Questions" && (
             <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 flex flex-col h-[650px]">
               <div>
@@ -675,7 +695,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                 </p>
               </div>
 
-              {/* Q&A Chat Display */}
               <div className="mt-6 flex-1 overflow-y-auto space-y-4 pr-2 border border-slate-800/80 rounded-lg p-5 bg-slate-950/60">
                 {qaHistory.length === 0 ? (
                   <div className="text-center mt-20">
@@ -704,7 +723,6 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
                 )}
               </div>
 
-              {/* Question Input Form */}
               <form onSubmit={handleAskAI} className="mt-4 flex gap-3">
                 <input
                   type="text"
@@ -883,7 +901,90 @@ ${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`)
             </div>
           )}
 
-          {/* TAB 5: REPORTS (END-OF-SESSION DIGEST & EXPORT) */}
+          {/* TAB 5: STUDENTS (PARTICIPATION & ENGAGEMENT METRICS) */}
+          {activeTab === "Students" && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-5">
+                <div>
+                  <h3 className="text-xl font-semibold">Student Participation & Activity</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Live engagement tracking, question counts, and voting status for {roomId.toUpperCase()}.
+                  </p>
+                </div>
+                <button
+                  onClick={fetchStudents}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 transition"
+                >
+                  🔄 Refresh Metrics
+                </button>
+              </div>
+
+              {students.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 italic">
+                  No individual student interactions recorded yet. Messages sent via student portal will appear here.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm text-slate-300">
+                    <thead className="border-b border-slate-800 bg-slate-950/50 text-xs font-semibold uppercase text-slate-400">
+                      <tr>
+                        <th className="px-4 py-3">Student Name</th>
+                        <th className="px-4 py-3">Engagement Badge</th>
+                        <th className="px-4 py-3">Messages</th>
+                        <th className="px-4 py-3">Questions Flagged</th>
+                        <th className="px-4 py-3">Poll Voted</th>
+                        <th className="px-4 py-3">Last Active</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {students.map((s, idx) => (
+                        <tr key={idx} className="hover:bg-slate-800/30 transition">
+                          <td className="px-4 py-3.5 font-medium text-white">{s.username}</td>
+                          <td className="px-4 py-3.5">
+                            <span
+                              className={`rounded-full px-2.5 py-0.5 text-xs font-semibold border ${
+                                s.badge === "Inquisitive"
+                                  ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                  : s.badge === "Highly Active"
+                                  ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                                  : s.badge === "Engaged Voter"
+                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                  : "bg-slate-800 text-slate-400 border-slate-700"
+                              }`}
+                            >
+                              {s.badge}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3.5 font-semibold text-slate-200">{s.message_count}</td>
+                          <td className="px-4 py-3.5">
+                            {s.questions_asked.length > 0 ? (
+                              <span className="text-amber-400 font-medium">
+                                {s.questions_asked.length} question(s)
+                              </span>
+                            ) : (
+                              <span className="text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5">
+                            {s.voted ? (
+                              <span className="text-emerald-400 font-semibold">✓ Yes</span>
+                            ) : (
+                              <span className="text-slate-500">✗ No</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5 text-xs text-slate-400">
+                            {new Date(s.last_active).toLocaleTimeString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 6: REPORTS */}
           {activeTab === "Reports" && (
             <div className="space-y-6">
               <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6">
