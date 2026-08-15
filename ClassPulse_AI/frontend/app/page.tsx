@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 interface AIInsights {
   summary: string;
@@ -33,6 +33,14 @@ export default function Home() {
   const [insights, setInsights] = useState<AIInsights | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Time-window filters
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
+
+  // Auto-pulse state
+  const [autoPulse, setAutoPulse] = useState(false);
+  const [lastAnalyzedCount, setLastAnalyzedCount] = useState(0);
+
   // WebSocket Live Chat States
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputUser, setInputUser] = useState("Arun");
@@ -45,6 +53,39 @@ export default function Home() {
   const [askQuery, setAskQuery] = useState("");
   const [asking, setAsking] = useState(false);
   const [qaHistory, setQaHistory] = useState<QAItem[]>([]);
+
+  // Trigger real-time AI analysis from FastAPI backend
+  const handleAnalyze = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      let url = `http://127.0.0.1:8000/rooms/${roomId}/analyze`;
+      const queryParams = new URLSearchParams();
+      if (startTime) queryParams.append("start_time", startTime);
+      if (endTime) queryParams.append("end_time", endTime);
+      if (queryParams.toString()) {
+        url += `?${queryParams.toString()}`;
+      }
+
+      let res = await fetch(url, {
+        method: "POST",
+      });
+
+      let data = await res.json();
+
+      if (data.insights) {
+        setInsights(data.insights);
+        setLastAnalyzedCount(data.message_count || 0);
+      } else if (data.error) {
+        setError(data.error);
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to connect to backend";
+      setError(errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  }, [roomId, startTime, endTime]);
 
   // Connect to WebSocket room
   useEffect(() => {
@@ -76,6 +117,20 @@ export default function Home() {
     };
   }, [roomId]);
 
+  // Auto-Pulse interval handler
+  useEffect(() => {
+    if (!autoPulse) return;
+
+    const interval = setInterval(() => {
+      const userMessages = messages.filter((m) => m.type === "message");
+      if (userMessages.length > lastAnalyzedCount) {
+        handleAnalyze();
+      }
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [autoPulse, messages, lastAnalyzedCount, handleAnalyze]);
+
   // Send message over WebSocket
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,30 +147,6 @@ export default function Home() {
     setInputMsg("");
   };
 
-  // Trigger real-time AI analysis from FastAPI backend
-  const handleAnalyze = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      let res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/analyze`, {
-        method: "POST",
-      });
-
-      let data = await res.json();
-
-      if (data.insights) {
-        setInsights(data.insights);
-      } else if (data.error) {
-        setError(data.error);
-      }
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : "Failed to connect to backend";
-      setError(errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // Ask ClassPulse AI custom question
   const handleAskAI = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -128,7 +159,11 @@ export default function Home() {
       const res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/ask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: askQuery.trim() }),
+        body: JSON.stringify({
+          query: askQuery.trim(),
+          start_time: startTime || null,
+          end_time: endTime || null,
+        }),
       });
 
       const data = await res.json();
@@ -193,7 +228,17 @@ export default function Home() {
               <h2 className="mt-1 text-3xl font-bold">{activeTab}</h2>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-300 bg-slate-900 border border-slate-800 px-3 py-2 rounded-lg cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoPulse}
+                  onChange={(e) => setAutoPulse(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-0"
+                />
+                Auto AI Pulse (15s)
+              </label>
+
               <div
                 className={`rounded-full px-4 py-2 text-sm font-medium border ${
                   wsConnected
@@ -203,6 +248,7 @@ export default function Home() {
               >
                 ● {wsConnected ? `Room ${roomId.toUpperCase()} Online (${participantCount} Active)` : "Disconnected"}
               </div>
+
               <button
                 onClick={handleAnalyze}
                 disabled={loading}
@@ -211,6 +257,42 @@ export default function Home() {
                 {loading ? "Analyzing with Gemini..." : "⚡ Run AI Pulse"}
               </button>
             </div>
+          </div>
+
+          {/* Time Window Analysis Controls */}
+          <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-wrap items-center gap-4 text-sm">
+            <span className="font-semibold text-slate-300">⏱️ Time-Window Filter:</span>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-slate-400">Start Time:</label>
+              <input
+                type="text"
+                placeholder="e.g. 2026-08-15T14:00:00"
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-slate-400">End Time:</label>
+              <input
+                type="text"
+                placeholder="e.g. 2026-08-15T15:00:00"
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+              />
+            </div>
+            {(startTime || endTime) && (
+              <button
+                onClick={() => {
+                  setStartTime("");
+                  setEndTime("");
+                }}
+                className="text-xs text-rose-400 hover:underline"
+              >
+                Clear Filter
+              </button>
+            )}
           </div>
 
           {error && (
@@ -407,10 +489,10 @@ export default function Home() {
                 <div>
                   <h3 className="text-lg font-semibold">How to Test Real-Time Flow</h3>
                   <ol className="mt-4 list-decimal list-inside space-y-3 text-sm text-slate-300 leading-relaxed">
-                    <li>Select different student names from the dropdown.</li>
-                    <li>Send 3-4 messages expressing questions or confusion about a topic.</li>
-                    <li>Switch to the <strong>Questions</strong> tab to ask natural language questions.</li>
-                    <li>Click <strong>⚡ Run AI Pulse</strong> on Overview to view the full classroom synthesis.</li>
+                    <li>Enable <strong>Auto AI Pulse</strong> above for continuous monitoring.</li>
+                    <li>Post questions from different student perspectives.</li>
+                    <li>Use the <strong>Time-Window Filter</strong> to constrain analysis to specific class phases.</li>
+                    <li>Query the assistant in the <strong>Questions</strong> tab.</li>
                   </ol>
                 </div>
 

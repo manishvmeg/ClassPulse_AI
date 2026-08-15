@@ -10,6 +10,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from database import get_stored_messages, save_message
+
 load_dotenv()
 
 app = FastAPI(title="ClassPulse AI")
@@ -46,14 +48,12 @@ class AskAIRequest(BaseModel):
 class ConnectionManager:
     def __init__(self):
         self.rooms: Dict[str, List[WebSocket]] = {}
-        self.room_messages: Dict[str, List[dict]] = {}
 
     async def connect(self, room_id: str, websocket: WebSocket):
         await websocket.accept()
 
         if room_id not in self.rooms:
             self.rooms[room_id] = []
-            self.room_messages[room_id] = []
 
         self.rooms[room_id].append(websocket)
 
@@ -64,10 +64,8 @@ class ConnectionManager:
             if not self.rooms[room_id]:
                 del self.rooms[room_id]
 
-    def add_message(self, room_id: str, message_data: dict):
-        if room_id not in self.room_messages:
-            self.room_messages[room_id] = []
-        self.room_messages[room_id].append(message_data)
+    def add_message(self, room_id: str, username: str, message: str, timestamp_str: str):
+        save_message(room_id, username, message, timestamp_str)
 
     def get_messages(
         self,
@@ -75,24 +73,7 @@ class ConnectionManager:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
     ) -> List[dict]:
-        all_msgs = self.room_messages.get(room_id, [])
-        if not start_time and not end_time:
-            return all_msgs
-
-        filtered = []
-        for msg in all_msgs:
-            msg_time = msg.get("timestamp")
-            if not msg_time:
-                filtered.append(msg)
-                continue
-
-            if start_time and msg_time < start_time:
-                continue
-            if end_time and msg_time > end_time:
-                continue
-            filtered.append(msg)
-
-        return filtered
+        return get_stored_messages(room_id, start_time, end_time)
 
     async def broadcast(self, room_id: str, message: dict):
         connections = self.rooms.get(room_id, [])
@@ -111,7 +92,7 @@ manager = ConnectionManager()
 def root():
     return {
         "status": "online",
-        "message": "ClassPulse AI backend is running",
+        "message": "ClassPulse AI backend is running with SQLite persistence",
     }
 
 
@@ -168,19 +149,23 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             if not message:
                 continue
 
+            iso_timestamp = datetime.now(timezone.utc).isoformat()
+
             event = {
                 "type": "message",
                 "username": username or "Anonymous",
                 "message": message,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": iso_timestamp,
                 "room_id": room_id,
             }
 
-            manager.add_message(room_id, {
-                "username": event["username"],
-                "message": event["message"],
-                "timestamp": event["timestamp"],
-            })
+            # Save to SQLite Database
+            manager.add_message(
+                room_id=room_id,
+                username=event["username"],
+                message=event["message"],
+                timestamp_str=iso_timestamp,
+            )
 
             await manager.broadcast(room_id, event)
 
