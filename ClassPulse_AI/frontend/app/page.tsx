@@ -12,6 +12,15 @@ interface AIInsights {
   recommendation: string;
 }
 
+interface SessionReport {
+  title: string;
+  executive_summary: string;
+  topics_covered: string[];
+  comprehension_breakdown: string;
+  unresolved_questions: string[];
+  recommended_next_lecture_plan: string[];
+}
+
 interface ChatMessage {
   type: string;
   username?: string;
@@ -24,6 +33,16 @@ interface QAItem {
   query: string;
   answer: string;
   timestamp: string;
+}
+
+interface PollData {
+  id: number;
+  room_id: string;
+  question: string;
+  options: string[];
+  is_active: boolean;
+  votes: Record<string, number>;
+  total_votes: number;
 }
 
 export default function Home() {
@@ -54,6 +73,16 @@ export default function Home() {
   const [asking, setAsking] = useState(false);
   const [qaHistory, setQaHistory] = useState<QAItem[]>([]);
 
+  // Poll States
+  const [activePoll, setActivePoll] = useState<PollData | null>(null);
+  const [pollQuestion, setPollQuestion] = useState("");
+  const [pollOptions, setPollOptions] = useState(["Yes, completely", "Somewhat confused", "Not at all"]);
+  const [creatingPoll, setCreatingPoll] = useState(false);
+
+  // Session Report State
+  const [report, setReport] = useState<SessionReport | null>(null);
+  const [generatingReport, setGeneratingReport] = useState(false);
+
   // Trigger real-time AI analysis from FastAPI backend
   const handleAnalyze = useCallback(async () => {
     setLoading(true);
@@ -67,10 +96,7 @@ export default function Home() {
         url += `?${queryParams.toString()}`;
       }
 
-      let res = await fetch(url, {
-        method: "POST",
-      });
-
+      let res = await fetch(url, { method: "POST" });
       let data = await res.json();
 
       if (data.insights) {
@@ -87,8 +113,22 @@ export default function Home() {
     }
   }, [roomId, startTime, endTime]);
 
+  // Fetch active poll on mount
+  const fetchActivePoll = useCallback(async () => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/polls/active`);
+      const data = await res.json();
+      if (data.poll) {
+        setActivePoll(data.poll);
+      }
+    } catch (err) {
+      console.error("Failed to fetch active poll:", err);
+    }
+  }, [roomId]);
+
   // Connect to WebSocket room
   useEffect(() => {
+    fetchActivePoll();
     const ws = new WebSocket(`ws://127.0.0.1:8000/ws/${roomId}`);
     wsRef.current = ws;
 
@@ -99,9 +139,14 @@ export default function Home() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setMessages((prev) => [...prev, data]);
-        if (data.participants !== undefined) {
-          setParticipantCount(data.participants);
+
+        if (data.type === "poll_created" || data.type === "poll_update") {
+          setActivePoll(data.poll);
+        } else {
+          setMessages((prev) => [...prev, data]);
+          if (data.participants !== undefined) {
+            setParticipantCount(data.participants);
+          }
         }
       } catch (err) {
         console.error("Failed to parse WS message:", err);
@@ -115,7 +160,7 @@ export default function Home() {
     return () => {
       ws.close();
     };
-  }, [roomId]);
+  }, [roomId, fetchActivePoll]);
 
   // Auto-Pulse interval handler
   useEffect(() => {
@@ -139,12 +184,123 @@ export default function Home() {
     }
 
     const payload = {
+      type: "message",
       username: inputUser.trim() || "Anonymous",
       message: inputMsg.trim(),
     };
 
     wsRef.current.send(JSON.stringify(payload));
     setInputMsg("");
+  };
+
+  // Submit a poll vote over WebSocket
+  const handleVote = (option: string) => {
+    if (!activePoll || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const payload = {
+      type: "poll_vote",
+      poll_id: activePoll.id,
+      username: inputUser.trim() || "Anonymous",
+      selected_option: option,
+    };
+
+    wsRef.current.send(JSON.stringify(payload));
+  };
+
+  // Create new poll
+  const handleCreatePoll = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pollQuestion.trim()) return;
+
+    const filteredOptions = pollOptions.filter((opt) => opt.trim().length > 0);
+    if (filteredOptions.length < 2) {
+      setError("Please provide at least 2 options for the poll.");
+      return;
+    }
+
+    setCreatingPoll(true);
+    setError(null);
+
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/polls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: pollQuestion.trim(),
+          options: filteredOptions,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.poll) {
+        setActivePoll(data.poll);
+        setPollQuestion("");
+      } else if (data.error) {
+        setError(data.error);
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to create poll";
+      setError(errorMessage);
+    } finally {
+      setCreatingPoll(false);
+    }
+  };
+
+  // Generate End-of-Session Report
+  const handleGenerateReport = async () => {
+    setGeneratingReport(true);
+    setError(null);
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/rooms/${roomId}/report`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (data.report) {
+        setReport(data.report);
+      } else if (data.error) {
+        setError(data.error);
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to generate report";
+      setError(errorMessage);
+    } finally {
+      setGeneratingReport(false);
+    }
+  };
+
+  // Download Report as Markdown File
+  const handleExportMarkdown = () => {
+    if (!report) return;
+
+    const content = `# ${report.title}
+*Generated by ClassPulse AI • Room: ${roomId.toUpperCase()}*
+
+## Executive Summary
+${report.executive_summary}
+
+## Topics Covered
+${report.topics_covered.map((t) => `- ${t}`).join("\n")}
+
+## Comprehension Breakdown
+${report.comprehension_breakdown}
+
+## Unresolved Student Questions
+${report.unresolved_questions.map((q) => `- ${q}`).join("\n")}
+
+## Recommended Next Lecture Plan
+${report.recommended_next_lecture_plan.map((step, idx) => `${idx + 1}. ${step}`).join("\n")}
+`;
+
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ClassPulse_Report_${roomId}_${new Date().toISOString().slice(0, 10)}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   // Ask ClassPulse AI custom question
@@ -259,7 +415,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Time Window Analysis Controls */}
+          {/* Time Window Filter */}
           <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-wrap items-center gap-4 text-sm">
             <span className="font-semibold text-slate-300">⏱️ Time-Window Filter:</span>
             <div className="flex items-center gap-2">
@@ -329,11 +485,13 @@ export default function Home() {
                 </div>
 
                 <div className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-                  <p className="text-sm text-slate-400">Primary Topics</p>
+                  <p className="text-sm text-slate-400">Active Poll Status</p>
                   <p className="mt-2 text-3xl font-bold">
-                    {insights ? insights.main_topics.length : 0}
+                    {activePoll ? `${activePoll.total_votes} Votes` : "None"}
                   </p>
-                  <p className="mt-2 text-sm text-emerald-400">Identified concepts</p>
+                  <p className="mt-2 text-sm text-emerald-400">
+                    {activePoll ? "Live student polling" : "No active poll"}
+                  </p>
                 </div>
               </div>
 
@@ -487,12 +645,12 @@ export default function Home() {
               {/* Quick Info Panel */}
               <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 flex flex-col justify-between">
                 <div>
-                  <h3 className="text-lg font-semibold">How to Test Real-Time Flow</h3>
+                  <h3 className="text-lg font-semibold">Live Class Guide</h3>
                   <ol className="mt-4 list-decimal list-inside space-y-3 text-sm text-slate-300 leading-relaxed">
-                    <li>Enable <strong>Auto AI Pulse</strong> above for continuous monitoring.</li>
-                    <li>Post questions from different student perspectives.</li>
-                    <li>Use the <strong>Time-Window Filter</strong> to constrain analysis to specific class phases.</li>
-                    <li>Query the assistant in the <strong>Questions</strong> tab.</li>
+                    <li>Enable <strong>Auto AI Pulse</strong> above for continuous intelligence.</li>
+                    <li>Simulate student queries from different usernames.</li>
+                    <li>Launch quick comprehension polls in the <strong>Polls</strong> tab.</li>
+                    <li>Generate an end-of-lecture digest in the <strong>Reports</strong> tab.</li>
                   </ol>
                 </div>
 
@@ -563,6 +721,278 @@ export default function Home() {
                   {asking ? "Thinking..." : "Ask AI"}
                 </button>
               </form>
+            </div>
+          )}
+
+          {/* TAB 4: POLLS */}
+          {activeTab === "Polls" && (
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="rounded-xl border border-slate-800 bg-slate-900 p-6 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xl font-semibold">Active Classroom Poll</h3>
+                    {activePoll && (
+                      <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 border border-emerald-500/20">
+                        Live ({activePoll.total_votes} votes)
+                      </span>
+                    )}
+                  </div>
+
+                  {activePoll ? (
+                    <div className="mt-6">
+                      <p className="text-lg font-medium text-slate-100 mb-5">
+                        {activePoll.question}
+                      </p>
+
+                      <div className="space-y-4">
+                        {activePoll.options.map((opt, idx) => {
+                          const voteCount = activePoll.votes[opt] || 0;
+                          const percent = activePoll.total_votes > 0
+                            ? Math.round((voteCount / activePoll.total_votes) * 100)
+                            : 0;
+
+                          return (
+                            <div key={idx} className="space-y-1.5">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-slate-200">{opt}</span>
+                                <span className="font-semibold text-slate-400">
+                                  {voteCount} ({percent}%)
+                                </span>
+                              </div>
+                              <div className="h-3 w-full rounded-full bg-slate-950 overflow-hidden border border-slate-800">
+                                <div
+                                  className="h-full bg-blue-500 transition-all duration-500"
+                                  style={{ width: `${percent}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-8 border-t border-slate-800 pt-5">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                            Cast a Vote (Simulating as {inputUser})
+                          </p>
+                          <select
+                            value={inputUser}
+                            onChange={(e) => setInputUser(e.target.value)}
+                            className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-300"
+                          >
+                            <option value="Arun">Arun</option>
+                            <option value="Priya">Priya</option>
+                            <option value="Rahul">Rahul</option>
+                            <option value="Sneha">Sneha</option>
+                            <option value="Kiran">Kiran</option>
+                          </select>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {activePoll.options.map((opt, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => handleVote(opt)}
+                              className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-blue-600 hover:border-blue-500 transition"
+                            >
+                              Vote &ldquo;{opt}&rdquo;
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-12 text-center text-slate-500 italic">
+                      No active poll running. Launch a new poll using the form.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
+                <h3 className="text-xl font-semibold mb-1">Launch New Poll</h3>
+                <p className="text-sm text-slate-400 mb-6">
+                  Broadcast an instant comprehension check to all participants in {roomId.toUpperCase()}.
+                </p>
+
+                <form onSubmit={handleCreatePoll} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-slate-400 mb-1.5">
+                      Question Prompt
+                    </label>
+                    <input
+                      type="text"
+                      value={pollQuestion}
+                      onChange={(e) => setPollQuestion(e.target.value)}
+                      placeholder="e.g. Can Dijkstra's algorithm work with negative edge weights?"
+                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-slate-400 mb-1.5">
+                      Poll Choices
+                    </label>
+                    <div className="space-y-2">
+                      {pollOptions.map((opt, idx) => (
+                        <div key={idx} className="flex gap-2">
+                          <input
+                            type="text"
+                            value={opt}
+                            onChange={(e) => {
+                              const newOpts = [...pollOptions];
+                              newOpts[idx] = e.target.value;
+                              setPollOptions(newOpts);
+                            }}
+                            placeholder={`Option ${idx + 1}`}
+                            className="flex-1 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                          />
+                          {pollOptions.length > 2 && (
+                            <button
+                              type="button"
+                              onClick={() => setPollOptions(pollOptions.filter((_, i) => i !== idx))}
+                              className="rounded-lg border border-slate-800 px-3 py-2 text-xs text-rose-400 hover:bg-rose-500/10"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {pollOptions.length < 5 && (
+                      <button
+                        type="button"
+                        onClick={() => setPollOptions([...pollOptions, ""])}
+                        className="mt-2 text-xs font-medium text-blue-400 hover:underline"
+                      >
+                        + Add another option
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={creatingPoll || !pollQuestion.trim()}
+                    className="w-full mt-4 rounded-lg bg-blue-600 px-5 py-3 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
+                  >
+                    {creatingPoll ? "Launching..." : "🚀 Broadcast Poll to Class"}
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: REPORTS (END-OF-SESSION DIGEST & EXPORT) */}
+          {activeTab === "Reports" && (
+            <div className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6">
+                <div>
+                  <h3 className="text-xl font-semibold">End-of-Lecture Executive Report</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Synthesize chat discussions, unanswered student questions, and poll metrics into an exportable digest.
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleGenerateReport}
+                    disabled={generatingReport}
+                    className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
+                  >
+                    {generatingReport ? "Generating Digest with Gemini..." : "⚡ Generate Session Report"}
+                  </button>
+
+                  {report && (
+                    <button
+                      onClick={handleExportMarkdown}
+                      className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold hover:bg-slate-700 text-slate-200 transition"
+                    >
+                      📥 Download .MD
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {report ? (
+                <div className="space-y-6 rounded-xl border border-slate-800 bg-slate-900 p-8">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-blue-400">
+                      ClassPulse Lecture Digest
+                    </span>
+                    <h2 className="mt-1 text-2xl font-bold text-white">{report.title}</h2>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-5">
+                    <h4 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                      Executive Summary
+                    </h4>
+                    <p className="text-sm leading-relaxed text-slate-200">
+                      {report.executive_summary}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-6 md:grid-cols-2">
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-5">
+                      <h4 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+                        Topics Covered
+                      </h4>
+                      <ul className="list-disc list-inside space-y-1.5 text-sm text-slate-300">
+                        {report.topics_covered.map((topic, i) => (
+                          <li key={i}>{topic}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-5">
+                      <h4 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+                        Comprehension & Poll Breakdown
+                      </h4>
+                      <p className="text-sm leading-relaxed text-slate-300">
+                        {report.comprehension_breakdown}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-6 md:grid-cols-2">
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-5">
+                      <h4 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+                        Unresolved Questions
+                      </h4>
+                      {report.unresolved_questions.length > 0 ? (
+                        <ul className="space-y-2 text-sm text-slate-300">
+                          {report.unresolved_questions.map((q, i) => (
+                            <li key={i} className="flex gap-2">
+                              <span className="text-amber-400 font-semibold">•</span>
+                              <span>{q}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-sm text-slate-500 italic">No unresolved questions flagged.</p>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-5">
+                      <h4 className="text-sm font-semibold uppercase tracking-wider text-blue-300 mb-3">
+                        Recommended Next Lecture Plan
+                      </h4>
+                      <ol className="list-decimal list-inside space-y-2 text-sm text-slate-200">
+                        {report.recommended_next_lecture_plan.map((step, i) => (
+                          <li key={i}>{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-12 text-center">
+                  <p className="text-slate-400 font-medium">No report generated for this session yet.</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Click &ldquo;⚡ Generate Session Report&rdquo; above to create a structured post-lecture summary.
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </section>
