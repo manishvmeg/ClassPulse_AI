@@ -26,8 +26,8 @@ const RaiseHand = dynamic(() => import("@/components/RaiseHand"), { ssr: false }
 const Whiteboard = dynamic(() => import("@/components/Whiteboard"), { ssr: false });
 const FileSharing = dynamic(() => import("@/components/FileSharing"), { ssr: false });
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
-const WS_URL  = process.env.NEXT_PUBLIC_WS_URL  ?? "ws://127.0.0.1:8000";
+import { API_URL, WS_URL } from "@/lib/config";
+
 
 
 

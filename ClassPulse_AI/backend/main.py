@@ -68,11 +68,18 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.loca\.lt|https://.*\.railway\.app|https://.*\.onrender\.com|http://localhost:.*|http://127\.0\.0\.1:.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # Upload directory for classroom files
 UPLOAD_DIR = Path("./uploads")
