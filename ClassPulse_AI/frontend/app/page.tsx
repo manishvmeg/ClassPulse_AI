@@ -3,8 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { UserButton } from "@clerk/nextjs";
+import UserAvatarMenu from "@/components/UserAvatarMenu";
 import ScheduleCalendar, { type ScheduleItem } from "@/components/ScheduleCalendar";
+
 import NotificationToast, { useToasts } from "@/components/NotificationToast";
 import {
   requestAndSubscribePush,
@@ -751,9 +752,10 @@ ${report.recommended_next_lecture_plan.map((s, i) => `${i + 1}. ${s}`).join("\n"
               )}
             </button>
 
-            <UserButton />
+            <UserAvatarMenu />
           </div>
         </header>
+
 
 
 

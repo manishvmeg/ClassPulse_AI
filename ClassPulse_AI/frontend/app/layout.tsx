@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -22,29 +21,24 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ClerkProvider
-      publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || "pk_test_Y2xhc3NwdWxzZS1haS1kZXYtcGxhY2Vob2xkZXIxMjM"}
-    >
-      <html lang="en" className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}>
-        <head>
-          {/* Service Worker registration — runs in the browser only */}
-          <script
-            dangerouslySetInnerHTML={{
-              __html: `
-                if ('serviceWorker' in navigator) {
-                  window.addEventListener('load', function () {
-                    navigator.serviceWorker.register('/sw.js', { scope: '/' })
-                      .then(function(reg) { console.log('[SW] Registered:', reg.scope); })
-                      .catch(function(err) { console.warn('[SW] Failed:', err); });
-                  });
-                }
-              `,
-            }}
-          />
-        </head>
-        <body className="min-h-full flex flex-col bg-slate-950">{children}</body>
-      </html>
-    </ClerkProvider>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}>
+      <head>
+        {/* Service Worker registration — runs in the browser only */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+                window.addEventListener('load', function () {
+                  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                    .then(function(reg) { console.log('[SW] Registered:', reg.scope); })
+                    .catch(function(err) { console.warn('[SW] Failed:', err); });
+                });
+              }
+            `,
+          }}
+        />
+      </head>
+      <body className="min-h-full flex flex-col bg-slate-950">{children}</body>
+    </html>
   );
 }
-

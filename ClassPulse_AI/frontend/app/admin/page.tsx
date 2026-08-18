@@ -1,7 +1,8 @@
 "use client";
 import { useState, useEffect } from "react";
-import { UserButton } from "@clerk/nextjs";
+import UserAvatarMenu from "@/components/UserAvatarMenu";
 import Link from "next/link";
+
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -67,10 +68,11 @@ export default function AdminPage() {
             <Link href="/" className="text-xs text-slate-400 hover:text-white transition">
               Dashboard
             </Link>
-            <UserButton />
+            <UserAvatarMenu />
           </div>
         </div>
       </header>
+
 
 
       <div className="max-w-7xl mx-auto px-6 py-8">

@@ -1,12 +1,12 @@
 "use client";
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { UserButton, useUser } from "@clerk/nextjs";
+import UserAvatarMenu from "@/components/UserAvatarMenu";
+
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export default function BillingPage() {
-  const { user } = useUser();
   const [plan, setPlan] = useState<string>("Free");
   const [loadingPortal, setLoadingPortal] = useState(false);
   const [stats, setStats] = useState({
@@ -23,10 +23,11 @@ export default function BillingPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          customer_id: user?.id ?? "mock_customer",
+          customer_id: "customer_id_default",
           return_url: window.location.href,
         }),
       });
+
       const data = await res.json();
       if (data.url) {
         window.location.href = data.url;
@@ -59,10 +60,11 @@ export default function BillingPage() {
             <Link href="/" className="text-xs text-slate-400 hover:text-white transition">
               Dashboard
             </Link>
-            <UserButton />
+            <UserAvatarMenu />
           </div>
         </div>
       </header>
+
 
 
       <div className="max-w-5xl mx-auto px-6 py-10">
