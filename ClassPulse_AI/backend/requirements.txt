@@ -1,7 +1,15 @@
-﻿fastapi
+fastapi
 uvicorn[standard]
 google-genai
 pydantic
 python-dotenv
 sqlalchemy
 websockets
+psycopg2-binary
+pywebpush
+py-vapid
+livekit-api
+stripe
+python-multipart
+aiofiles
+
