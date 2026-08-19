@@ -362,7 +362,8 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 
 class LiveKitTokenRequest(BaseModel):
-    participant_name: str = Field(description="Display name shown in the video grid")
+    participant_name: Optional[str] = Field(default=None, description="Display name shown in the video grid")
+    username: Optional[str] = Field(default=None, description="Alternative alias for participant_name")
     is_host: bool = Field(default=False, description="True for teachers — grants room-admin powers")
     participant_identity: Optional[str] = Field(default=None, description="Unique ID; auto-generated if omitted")
 
@@ -389,7 +390,9 @@ async def generate_livekit_token(room_id: str, req: LiveKitTokenRequest):
     if not all([LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET]):
         return {"error": "LiveKit not configured on server."}
 
-    identity = req.participant_identity or f"{req.participant_name.lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
+    name = req.participant_name or req.username or "Participant"
+    identity = req.participant_identity or f"{name.lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
+
 
     grants = lkapi.VideoGrants(
         room_join=True,
