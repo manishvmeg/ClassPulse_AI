@@ -180,10 +180,11 @@ class SharedFileRecord(Base):
 # Create all tables (idempotent)
 Base.metadata.create_all(bind=engine)
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
-# Auto-migrate missing columns for SQLite
-if DATABASE_URL.startswith("sqlite"):
+# Auto-migrate missing columns for SQLite & Postgres
+try:
+    inspector = inspect(engine)
     with engine.connect() as conn:
         for table, col, col_type in [
             ("rooms", "name", "VARCHAR(256) DEFAULT 'Interactive Classroom'"),
@@ -198,16 +199,19 @@ if DATABASE_URL.startswith("sqlite"):
             ("insights", "sentiment", "VARCHAR(64) DEFAULT 'Neutral'"),
         ]:
             try:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
-                conn.commit()
+                existing_cols = [c["name"] for c in inspector.get_columns(table)]
+                if col not in existing_cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                    conn.commit()
             except Exception:
                 pass
-        # Copy legacy options_json if exists
         try:
-            conn.execute(text("UPDATE polls SET options = options_json WHERE options IS NULL OR options = '[]'"))
+            conn.execute(text("UPDATE polls SET options = options_json WHERE (options IS NULL OR options = '[]') AND options_json IS NOT NULL"))
             conn.commit()
         except Exception:
             pass
+except Exception:
+    pass
 
 
 
@@ -265,7 +269,7 @@ def save_message(
         db.refresh(record)
 
         # Track message count in attendance
-        if not is_anonymous and username != "System" and username != "Teacher" and username != "Instructor":
+        if username not in ("System", "Teacher", "Instructor", "Anonymous"):
             att = db.query(AttendanceRecord).filter(
                 AttendanceRecord.room_id == str(room_id),
                 AttendanceRecord.username == username,
@@ -304,7 +308,7 @@ def get_stored_messages(
             {
                 "id": rec.id,
                 "username": "Anonymous" if rec.is_anonymous else rec.username,
-                "raw_username": rec.username,
+                "raw_username": "Anonymous" if rec.is_anonymous else rec.username,
                 "message": rec.message,
                 "is_doubt": bool(rec.is_doubt),
                 "is_anonymous": bool(rec.is_anonymous),
@@ -624,8 +628,9 @@ def get_student_metrics(room_id: str) -> List[dict]:
             user_stats[u]["message_count"] += 1
             if msg.is_doubt:
                 user_stats[u]["doubt_count"] += 1
-                user_stats[u]["questions_asked"].append(msg.message)
-            elif "?" in msg.message:
+                if not msg.is_anonymous:
+                    user_stats[u]["questions_asked"].append(msg.message)
+            elif "?" in msg.message and not msg.is_anonymous:
                 user_stats[u]["questions_asked"].append(msg.message)
 
         # Assign Dynamic Badges:

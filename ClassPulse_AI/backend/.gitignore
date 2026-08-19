@@ -2,8 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.env
+# Environment & Secrets
 .env
+.env*
+*.env
+.env.production
+.env.local
 
 # SQLite Database
 *.db

@@ -11,9 +11,12 @@ frontend/out/
 
 # Environment variables & secrets (keep private)
 .env
+.env*
+*.env
 .env.local
 .env.*.local
 backend/.env
+backend/.env*
 frontend/.env.local
 backend/vapid_keys.json
 
