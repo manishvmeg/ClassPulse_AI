@@ -306,14 +306,25 @@ class ConnectionManager:
         self.peer_map.setdefault(room_id, {})[username] = websocket
 
     def disconnect(self, room_id: str, websocket: WebSocket):
+        username = None
+        if room_id in self.peer_map:
+            dead = [u for u, ws in self.peer_map[room_id].items() if ws is websocket]
+            for u in dead:
+                username = u
+                del self.peer_map[room_id][u]
+            if not self.peer_map[room_id]:
+                del self.peer_map[room_id]
+
         if room_id in self.rooms and websocket in self.rooms[room_id]:
             self.rooms[room_id].remove(websocket)
             if not self.rooms[room_id]:
                 del self.rooms[room_id]
-        if room_id in self.peer_map:
-            dead = [u for u, ws in self.peer_map[room_id].items() if ws is websocket]
-            for u in dead:
-                del self.peer_map[room_id][u]
+
+        # Clean up pace votes to prevent memory leak and telemetry skew
+        if username and room_id in self.pace_votes and username in self.pace_votes[room_id]:
+            del self.pace_votes[room_id][username]
+            if not self.pace_votes[room_id]:
+                del self.pace_votes[room_id]
 
     def record_pace_vote(self, room_id: str, username: str, pace: str) -> dict:
         if pace not in ("too_fast", "good", "too_slow"):
@@ -354,13 +365,20 @@ class ConnectionManager:
         }
 
     async def broadcast(self, room_id: str, message: dict, exclude: Optional[WebSocket] = None):
-        for conn in self.rooms.get(room_id, []).copy():
-            if conn is exclude:
-                continue
+        async def _safe_send(conn: WebSocket):
             try:
-                await conn.send_json(message)
+                await asyncio.wait_for(conn.send_json(message), timeout=1.0)
             except Exception:
                 self.disconnect(room_id, conn)
+
+        conns = self.rooms.get(room_id, []).copy()
+        tasks = [
+            asyncio.create_task(_safe_send(conn))
+            for conn in conns
+            if conn is not exclude
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def broadcast_all_rooms(self, message: dict):
         for room_id in list(self.rooms.keys()):
@@ -370,7 +388,7 @@ class ConnectionManager:
         peer_ws = self.peer_map.get(room_id, {}).get(target_username)
         if peer_ws:
             try:
-                await peer_ws.send_json(message)
+                await asyncio.wait_for(peer_ws.send_json(message), timeout=1.0)
             except Exception:
                 self.disconnect(room_id, peer_ws)
 
@@ -1120,14 +1138,16 @@ def _generate_with_gemini(contents: str, schema: Optional[Any] = None, system_pr
 
     for model_name in models_to_try:
         try:
-            config_kwargs = {}
+            config_kwargs = {
+                "http_options": {"timeout": 15.0}  # Limit execution to 15s max per model attempt
+            }
             if schema:
                 config_kwargs["response_mime_type"] = "application/json"
                 config_kwargs["response_schema"] = schema
             if system_prompt:
                 config_kwargs["system_instruction"] = system_prompt
 
-            config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+            config = types.GenerateContentConfig(**config_kwargs)
             response = gemini_client.models.generate_content(
                 model=model_name,
                 contents=contents,
@@ -1136,6 +1156,7 @@ def _generate_with_gemini(contents: str, schema: Optional[Any] = None, system_pr
             if response and response.text:
                 return response.text
         except Exception as err:
+            logger.warning(f"Gemini attempt on {model_name} failed: {err}")
             last_error = err
             continue
 

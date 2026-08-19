@@ -22,7 +22,9 @@ backend/vapid_keys.json
 
 # Local databases & uploads
 *.db
+*.db-*
 backend/classpulse.db
+backend/classpulse.db-*
 backend/uploads/
 uploads/
 
