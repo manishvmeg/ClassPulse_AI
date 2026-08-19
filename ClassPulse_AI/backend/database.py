@@ -1049,3 +1049,35 @@ def get_admin_dashboard_stats() -> dict:
         }
     finally:
         db.close()
+
+
+def get_room_plan_limits(room_id: str) -> dict:
+    from stripe_service import PLAN_LIMITS
+    db = SessionLocal()
+    try:
+        room = db.query(Room).filter(Room.id == str(room_id)).first()
+        if not room or not room.teacher_id:
+            return PLAN_LIMITS["free"]
+        sub = db.query(UserSubscription).filter(UserSubscription.clerk_user_id == room.teacher_id).first()
+        if not sub or sub.status != "active":
+            return PLAN_LIMITS["free"]
+        plan = sub.plan.lower() if sub.plan else "free"
+        return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+    except Exception:
+        return PLAN_LIMITS["free"]
+    finally:
+        db.close()
+
+
+def get_insights_count_today(room_id: str) -> int:
+    db = SessionLocal()
+    try:
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        return db.query(InsightRecord).filter(
+            InsightRecord.room_id == str(room_id),
+            InsightRecord.timestamp >= since,
+        ).count()
+    except Exception:
+        return 0
+    finally:
+        db.close()

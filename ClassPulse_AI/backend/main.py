@@ -112,6 +112,8 @@ from database import (
     schedule_to_dict,
     upsert_push_subscription,
     upsert_user_subscription,
+    get_room_plan_limits,
+    get_insights_count_today,
 )
 from stripe_service import (
     PRICE_INSTITUTE_ANNUAL,
@@ -886,6 +888,40 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             # 1. Join / Attendance Lifecycle
             if event_type == "join":
                 username = str(data.get("username", "Student")).strip()
+
+                # Plan limit: max student capacity check
+                limits = await asyncio.to_thread(get_room_plan_limits, room_id)
+                max_students = limits.get("max_students_per_room", 10)
+                current_count = len(manager.rooms.get(room_id, []))
+
+                # Room lock & session duration limit checks
+                room_record = await asyncio.to_thread(get_or_create_room, room_id)
+                if room_record:
+                    if room_record.is_locked:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "This classroom is currently locked by the instructor.",
+                        })
+                        continue
+                    
+                    # Plan limit: session duration check (e.g. 40 minutes for Free)
+                    elapsed_minutes = (datetime.now(timezone.utc) - room_record.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 60.0
+                    max_minutes = limits.get("session_minutes", 40)
+                    if elapsed_minutes >= max_minutes:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"This room has exceeded its {max_minutes}-minute limit for the Free tier. Upgrade to Pro/Institute to continue.",
+                        })
+                        await websocket.close()
+                        return
+
+                if current_count >= max_students:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Room limit reached ({max_students} students max). Upgrade to Pro/Institute to unlock larger rooms.",
+                    })
+                    continue
+
                 participant_username = username
                 manager.register_peer(room_id, username, websocket)
                 await asyncio.to_thread(record_attendance_join, room_id, username)
@@ -1030,6 +1066,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 await manager.broadcast(room_id, data)
 
             elif event_type == "breakout_start":
+                # Enforce plan limits for breakout rooms
+                limits = await asyncio.to_thread(get_room_plan_limits, room_id)
+                if not limits.get("breakout_rooms", False):
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Breakout rooms are not available on the Free tier. Upgrade to Pro/Institute to unlock breakout sub-rooms.",
+                    })
+                    continue
+
                 await manager.broadcast(room_id, {
                     "type": "breakout_started",
                     "rooms": data.get("rooms", []),
@@ -1315,6 +1360,25 @@ async def analyze_room_telemetry(room_id: str = "room1"):
                 "recommendation": "Start with an opening poll or icebreaker.",
             },
             "message_count": 0,
+        }
+
+    # Enforce AI analysis plan limits
+    limits = await asyncio.to_thread(get_room_plan_limits, room_id)
+    max_analyses = limits.get("ai_analyses_per_day", 3)
+    insight_count = await asyncio.to_thread(get_insights_count_today, room_id)
+    if insight_count >= max_analyses:
+        return {
+            "insights": {
+                "summary": "AI Limit reached for today (Free tier: max 3). Upgrade to Pro/Institute for unlimited runs.",
+                "main_topics": ["Quota Exceeded"],
+                "sentiment": "Neutral",
+                "important_questions": [],
+                "top_concerns": ["Upgrade plan to Pro or Institute"],
+                "action_items": ["Upgrade subscription for unlimited runs"],
+                "recommendation": "Transition to Pro/Institute tier to unlock continuous real-time telemetry analysis.",
+            },
+            "message_count": len(messages),
+            "room_id": room_id,
         }
 
     insights = await asyncio.to_thread(_run_analyze, messages)
