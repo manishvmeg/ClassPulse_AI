@@ -2,49 +2,58 @@
 
 import { use, useEffect, useRef, useState, useCallback } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import {
+  ArrowLeft,
+  BookOpen,
+  CheckCircle2,
+  FastForward,
+  HelpCircle,
+  MessageSquare,
+  Mic,
+  Radio,
+  Rewind,
+  Send,
+  Sparkles,
+  User,
+  Users,
+  Video,
+  VideoOff,
+  Vote,
+  X,
+  EyeOff,
+  Flame,
+  FileText,
+  Volume2,
+} from "lucide-react";
+
+import PaceGauge, { type PaceTelemetry } from "@/components/PaceGauge";
+import LiveCaptions from "@/components/LiveCaptions";
+import FlashcardDeck from "@/components/FlashcardDeck";
+import VideoGrid from "@/components/VideoGrid";
 import NotificationToast, { useToasts } from "@/components/NotificationToast";
 import { requestAndSubscribePush, showLocalNotification } from "@/lib/pushNotifications";
-import type { ScheduleItem } from "@/components/ScheduleCalendar";
-
-// LiveKit must be loaded client-side only (no SSR)
-const LiveKitVideoRoom = dynamic(
-  () => import("@/components/LiveKitVideoRoom"),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="rounded-2xl border border-slate-800 bg-slate-900 flex items-center justify-center h-48">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-7 h-7 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs text-slate-400">Loading video...</p>
-        </div>
-      </div>
-    ),
-  }
-);
-
-const RaiseHand = dynamic(() => import("@/components/RaiseHand"), { ssr: false });
-const Whiteboard = dynamic(() => import("@/components/Whiteboard"), { ssr: false });
-const FileSharing = dynamic(() => import("@/components/FileSharing"), { ssr: false });
-
 import { API_URL, WS_URL } from "@/lib/config";
 
-
-
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Types
-// ──────────────────────────────────────────────────────────────────────────────
+// Dynamically load Whiteboard and FileSharing
+const Whiteboard = dynamic(() => import("@/components/Whiteboard"), { ssr: false });
+const FileSharing = dynamic(() => import("@/components/FileSharing"), { ssr: false });
+const RaiseHand = dynamic(() => import("@/components/RaiseHand"), { ssr: false });
 
 interface ChatMessage {
   type: string;
+  id?: number;
   username?: string;
+  raw_username?: string;
   message: string;
+  is_doubt?: boolean;
+  is_anonymous?: boolean;
   timestamp: string;
   participants?: number;
 }
 
 interface PollData {
-  id: number;
+  id: string | number;
   room_id: string;
   question: string;
   options: string[];
@@ -52,10 +61,6 @@ interface PollData {
   votes: Record<string, number>;
   total_votes: number;
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────────
 
 const AVATAR_COLORS = [
   "bg-blue-600", "bg-indigo-600", "bg-violet-600", "bg-emerald-600",
@@ -72,10 +77,6 @@ function getInitials(name: string): string {
   return name.split(" ").map((w) => w[0]?.toUpperCase() ?? "").slice(0, 2).join("");
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Main Component
-// ──────────────────────────────────────────────────────────────────────────────
-
 export default function StudentRoomPage({
   params,
 }: {
@@ -83,576 +84,655 @@ export default function StudentRoomPage({
 }) {
   const { roomId } = use(params);
 
+  // User Join State
   const [username, setUsername] = useState("");
   const [hasJoined, setHasJoined] = useState(false);
+
+  // Real-time State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMsg, setInputMsg] = useState("");
+  const [isDoubt, setIsDoubt] = useState(false);
+  const [isAnonymous, setIsAnonymous] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+
   const [activePoll, setActivePoll] = useState<PollData | null>(null);
   const [selectedVote, setSelectedVote] = useState<string | null>(null);
   const [pollDismissed, setPollDismissed] = useState(false);
+  const [isVoting, setIsVoting] = useState(false);
+
   const [wsConnected, setWsConnected] = useState(false);
-  const [participantCount, setParticipantCount] = useState(0);
-  const [showVideo, setShowVideo] = useState(false);
-  const [isSending, setIsSending] = useState(false);
-  const [studentTab, setStudentTab] = useState<"chat" | "whiteboard" | "files">("chat");
+  const [participantCount, setParticipantCount] = useState(1);
 
-  // ── New: Notifications + Schedule state ──────────────────────────────────
+  // Pace Telemetry
+  const [userPace, setUserPace] = useState<"too_fast" | "good" | "too_slow" | null>(null);
+  const [paceTelemetry, setPaceTelemetry] = useState<PaceTelemetry>({
+    too_fast: 0,
+    good: 1,
+    too_slow: 0,
+    total_votes: 1,
+    too_fast_pct: 0,
+    good_pct: 100,
+    too_slow_pct: 0,
+    dominant_pace: "good",
+  });
+
+  // Catch Me Up
+  const [showCatchUpModal, setShowCatchUpModal] = useState(false);
+  const [catchUpLoading, setCatchUpLoading] = useState(false);
+  const [catchUpBullets, setCatchUpBullets] = useState<string[]>([]);
+
+  // Active View Tabs: chat | video | whiteboard | files | revision
+  const [studentTab, setStudentTab] = useState<"chat" | "video" | "whiteboard" | "files" | "revision">("chat");
+  const [showCaptions, setShowCaptions] = useState(false);
+
   const { toasts, addToast, removeToast } = useToasts();
-  const [upcomingClasses, setUpcomingClasses] = useState<ScheduleItem[]>([]);
-  const [pushEnabled, setPushEnabled] = useState(false);
-
   const wsRef = useRef<WebSocket | null>(null);
-
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom on new messages
+  // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Reset poll dismissed state when a new poll arrives
-  useEffect(() => {
-    if (activePoll) setPollDismissed(false);
-  }, [activePoll?.id]);
-
-  // ── Fetch current active poll ─────────────────────────────────────────────
-  const fetchActivePoll = useCallback(async () => {
+  // Fetch initial active poll & messages
+  const fetchRoomState = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/rooms/${roomId}/polls/active`);
-      const data = await res.json();
-      if (data.poll) setActivePoll(data.poll);
-    } catch {
-      /* silent */
+      const [pollRes, msgsRes, paceRes] = await Promise.all([
+        fetch(`${API_URL}/rooms/${roomId}/polls/active`),
+        fetch(`${API_URL}/rooms/${roomId}/messages`),
+        fetch(`${API_URL}/rooms/${roomId}/pace`),
+      ]);
+
+      if (pollRes.ok) {
+        const pData = await pollRes.json();
+        if (pData.poll) setActivePoll(pData.poll);
+      }
+      if (msgsRes.ok) {
+        const mData = await msgsRes.json();
+        if (mData.messages) setMessages(mData.messages);
+      }
+      if (paceRes.ok) {
+        const pcData = await paceRes.json();
+        if (pcData.dominant_pace) setPaceTelemetry(pcData);
+      }
+    } catch (e) {
+      console.warn("Failed fetching room initial state:", e);
     }
   }, [roomId]);
 
-  // ── Connect WebSocket once user joins ─────────────────────────────────────
+  // Connect WebSocket after joining
   useEffect(() => {
     if (!hasJoined) return;
 
-    fetchActivePoll();
+    fetchRoomState();
     const ws = new WebSocket(`${WS_URL}/ws/${roomId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => setWsConnected(true);
+    ws.onopen = () => {
+      setWsConnected(true);
+      // Send join event with attendance recording
+      ws.send(JSON.stringify({ type: "join", username: username.trim() }));
+    };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        if (data.type === "poll_created" || data.type === "poll_update") {
-          setActivePoll(data.poll);
-          setSelectedVote(null);
-        } else if (data.type === "class_scheduled") {
-          const s = data.schedule as ScheduleItem;
-          setUpcomingClasses((prev) =>
-            prev.find((x) => x.id === s.id) ? prev : [...prev, s]
-          );
-          addToast({
-            type: "success",
-            title: "New Class Scheduled",
-            body: `"${s.title}" on ${new Date(s.scheduled_at).toLocaleString()} · Room ${s.room_id.toUpperCase()}`,
-            duration: 8000,
-          });
-          showLocalNotification(
-            "ClassPulse AI — New Class",
-            `"${s.title}" on ${new Date(s.scheduled_at).toLocaleString()}`
-          );
-        } else if (data.type === "class_reminder") {
-          const s = data.schedule as ScheduleItem;
-          addToast({
-            type: "reminder",
-            title: "🔔 Class starts in 5 minutes!",
-            body: `"${s.title}" — Room ${s.room_id.toUpperCase()}`,
-            action: { label: "Get Ready", href: "#" },
-            duration: 12000,
-          });
-          showLocalNotification(
-            "ClassPulse AI — Class Starting Soon!",
-            `"${s.title}" starts in ~5 minutes!`
-          );
-        } else if (data.type === "schedule_deleted") {
-          setUpcomingClasses((prev) =>
-            prev.filter((s) => s.id !== data.schedule_id)
-          );
-        } else if (
-          data.type !== "video-offer" &&
-          data.type !== "video-answer" &&
-          data.type !== "video-ice-candidate" &&
-          data.type !== "video-join" &&
-          data.type !== "video-leave"
-        ) {
+        if (data.type === "message" || data.type === "chat") {
           setMessages((prev) => [...prev, data]);
+        } else if (data.type === "pace_telemetry") {
+          setPaceTelemetry(data);
+        } else if (data.type === "poll_created" || data.type === "poll_update") {
+          setActivePoll(data.poll);
+          if (data.type === "poll_created") {
+            setPollDismissed(false);
+            setSelectedVote(null);
+            addToast({
+              type: "info",
+              title: "New Poll Broadcasted!",
+              body: data.poll.question,
+              duration: 6000,
+            });
+          }
+        } else if (data.type === "system") {
           if (data.participants !== undefined) setParticipantCount(data.participants);
         }
-      } catch {
+      } catch (e) {
         /* ignore */
       }
     };
 
     ws.onclose = () => setWsConnected(false);
 
-    return () => ws.close();
-  }, [hasJoined, roomId, fetchActivePoll, addToast]);
+    return () => {
+      ws.close();
+    };
+  }, [hasJoined, roomId, username, fetchRoomState, addToast]);
 
-  // ── After joining: fetch schedule + subscribe to push ────────────────────
-  useEffect(() => {
-    if (!hasJoined || !username) return;
+  const handleJoin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!username.trim()) return;
+    setHasJoined(true);
+    // Request push permissions
+    requestAndSubscribePush(username.trim(), "student", roomId);
+  };
 
-    // Fetch upcoming classes for this room
-    fetch(`${API_URL}/rooms/${roomId}/schedules?upcoming_only=true`)
-      .then((r) => r.json())
-      .then((d) => setUpcomingClasses(d.schedules ?? []))
-      .catch(() => {});
-
-    // Auto-subscribe to browser push notifications
-    requestAndSubscribePush(username.trim(), "student", roomId).then((result) => {
-      if (result.subscribed) setPushEnabled(true);
-    });
-  }, [hasJoined, username, roomId]);
-
-
-
-  // ── Send message ──────────────────────────────────────────────────────────
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputMsg.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
     setIsSending(true);
-    wsRef.current.send(JSON.stringify({
+    const payload = {
       type: "message",
       username: username.trim(),
       message: inputMsg.trim(),
-    }));
+      is_doubt: isDoubt,
+      is_anonymous: isAnonymous,
+    };
+    wsRef.current.send(JSON.stringify(payload));
     setInputMsg("");
-    setTimeout(() => setIsSending(false), 300);
+    setIsDoubt(false);
+    setIsSending(false);
   };
 
-  // ── Cast vote ─────────────────────────────────────────────────────────────
-  const handleVote = (option: string) => {
-    if (!activePoll || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  const handlePaceVote = (pace: "too_fast" | "good" | "too_slow") => {
+    setUserPace(pace);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "pace_update",
+          username: username.trim(),
+          pace,
+        })
+      );
+    }
+  };
+
+  const handlePollVote = async (option: string) => {
+    if (!activePoll || isVoting) return;
     setSelectedVote(option);
-    wsRef.current.send(JSON.stringify({
-      type: "poll_vote",
-      poll_id: activePoll.id,
-      username: username.trim(),
-      selected_option: option,
-    }));
-    // Auto-dismiss poll card after voting
-    setTimeout(() => setPollDismissed(true), 1200);
+    setIsVoting(true);
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "poll_vote",
+          poll_id: activePoll.id,
+          username: username.trim(),
+          selected_option: option,
+        })
+      );
+    }
+    setIsVoting(false);
   };
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // JOIN SCREEN
-  // ──────────────────────────────────────────────────────────────────────────
+  const handleCatchMeUp = async () => {
+    setShowCatchUpModal(true);
+    setCatchUpLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/rooms/${roomId}/catch-up`, { method: "POST" });
+      const data = await res.json();
+      if (data.summary) {
+        setCatchUpBullets(data.summary);
+      }
+    } catch (e) {
+      setCatchUpBullets([
+        "The class is currently discussing key lecture concepts.",
+        "Students have submitted doubts regarding practical application.",
+        "Review the active whiteboard and chat to get up to speed.",
+      ]);
+    } finally {
+      setCatchUpLoading(false);
+    }
+  };
+
+  // Join Screen
   if (!hasJoined) {
     return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-4 text-white relative overflow-hidden">
-        {/* Background gradient glow */}
-        <div className="absolute inset-0 bg-gradient-to-br from-blue-950/20 via-slate-950 to-indigo-950/20 pointer-events-none" />
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="relative w-full max-w-md animate-slide-up">
-          {/* Logo */}
-          <div className="text-center mb-8">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-2xl mx-auto mb-4 animate-pulse-glow">
-              <svg className="w-7 h-7 text-white" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-              </svg>
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-slate-100 relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-tr from-blue-900/10 via-slate-950 to-indigo-900/10" />
+        <div className="relative w-full max-w-md bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-3xl p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-3 bg-blue-600/20 border border-blue-500/30 rounded-2xl text-blue-400">
+              <Sparkles className="w-6 h-6 animate-pulse" />
             </div>
-            <h1 className="text-2xl font-bold gradient-text">ClassPulse AI</h1>
-            <p className="text-sm text-slate-400 mt-1">Real-Time Classroom Intelligence</p>
+            <div>
+              <h1 className="text-xl font-extrabold text-white">ClassPulse Student Portal</h1>
+              <p className="text-xs text-slate-400">Room: <span className="text-indigo-400 font-mono font-bold uppercase">{roomId}</span></p>
+            </div>
           </div>
 
-          <div className="glass-strong rounded-2xl p-8 shadow-2xl">
-            <div className="mb-6">
-              <h2 className="text-lg font-bold">Join Classroom</h2>
-              <p className="text-sm text-slate-400 mt-1">
-                Room: <span className="text-blue-400 font-semibold uppercase">{roomId}</span>
-              </p>
+          <form onSubmit={handleJoin} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-2">
+                Your Full Name / Alias
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Alex Johnson"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoFocus
+                className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-slate-400"
+              />
             </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (username.trim()) setHasJoined(true);
-              }}
-              className="space-y-4"
+            <button
+              type="submit"
+              disabled={!username.trim()}
+              className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white text-sm font-bold shadow-lg shadow-blue-600/30 transition-all transform active:scale-95 flex items-center justify-center gap-2"
             >
-              <div>
-                <label className="block text-xs font-semibold uppercase text-slate-400 mb-2 tracking-wider">
-                  Your Name
-                </label>
-                <input
-                  type="text"
-                  required
-                  autoFocus
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="e.g. Arun Kumar"
-                  className="input-field"
-                />
-              </div>
+              <Users className="w-4 h-4" />
+              <span>Join Live Lecture</span>
+            </button>
+          </form>
 
-              <button type="submit" disabled={!username.trim()} className="btn-primary w-full justify-center py-3">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
-                </svg>
-                Enter Classroom
-              </button>
-            </form>
-
-            <p className="text-center text-[11px] text-slate-600 mt-5">
-              Your name will be visible to the instructor and other participants.
-            </p>
+          <div className="mt-6 pt-4 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+            <Link href="/" className="hover:text-slate-200 transition-colors flex items-center gap-1">
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Teacher Command Center
+            </Link>
+            <span className="flex items-center gap-1 text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+              Live Room
+            </span>
           </div>
         </div>
-      </main>
+      </div>
     );
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // STUDENT CLASSROOM VIEW
-  // ──────────────────────────────────────────────────────────────────────────
-
-  const showPollCard = activePoll && !pollDismissed;
-
   return (
-    <main className="min-h-screen bg-slate-950 text-white flex flex-col max-w-2xl mx-auto p-4 pb-6 relative">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      <NotificationToast toasts={toasts} onClose={removeToast} />
 
-      {/* ── HEADER ─────────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between py-3 px-1 mb-4 animate-fade-in">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center">
-            <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
+      {/* Header Bar */}
+      <header className="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40 px-4 py-3">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Link href="/" className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition-colors">
+              <ArrowLeft className="w-4 h-4" />
+            </Link>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm sm:text-base font-extrabold text-white">ClassPulse</h1>
+                <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 font-mono text-[11px] font-bold uppercase">
+                  {roomId}
+                </span>
+                <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  {participantCount} online
+                </span>
+              </div>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-semibold text-slate-200">ClassPulse AI</p>
-            <p className="text-[11px] text-slate-500">
-              Room <span className="text-blue-400 font-medium uppercase">{roomId}</span>
-              {participantCount > 0 && <span className="ml-1 text-slate-600">· {participantCount} online</span>}
-            </p>
+
+          {/* Quick Actions */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCatchMeUp}
+              className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+              title="Get a 3-bullet instant summary of recent lecture events"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+              <span>Catch Me Up</span>
+            </button>
+
+            <button
+              onClick={() => setShowCaptions(!showCaptions)}
+              className={`p-2 rounded-xl border text-xs font-semibold flex items-center gap-1 transition-all ${
+                showCaptions
+                  ? "bg-rose-500/20 border-rose-500/40 text-rose-300"
+                  : "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700"
+              }`}
+              title="Toggle Live Speech Captions"
+            >
+              <Radio className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Video toggle */}
-          <button
-            onClick={() => setShowVideo((v) => !v)}
-            className={`btn-secondary text-xs py-1.5 px-3 ${showVideo ? "border-blue-500/40 text-blue-400" : ""}`}
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M15 10l4.553-2.069A1 1 0 0121 8.868v6.264a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-            </svg>
-            Video
-          </button>
-
-          {/* Connection status */}
-          <span className={`badge ${wsConnected ? "badge-emerald" : "badge-rose"} text-[11px]`}>
-            <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${wsConnected ? "bg-emerald-400 animate-pulse-dot" : "bg-rose-400"}`} />
-            {wsConnected ? "Live" : "Connecting..."}
-          </span>
+        {/* Pace Bar Integration for Student */}
+        <div className="max-w-7xl mx-auto mt-2 pt-2 border-t border-slate-800/60">
+          <PaceGauge
+            telemetry={paceTelemetry}
+            interactive={true}
+            userVote={userPace}
+            onVote={handlePaceVote}
+            compact={true}
+          />
         </div>
       </header>
 
-      {/* ── MY IDENTITY CARD ───────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 mb-4 animate-fade-in delay-75">
-        <div className={`avatar ${getAvatarColor(username)}`}>{getInitials(username)}</div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-white">{username}</p>
-          <p className="text-[11px] text-slate-500">Your classroom identity</p>
+      {/* Main Grid & Tabs */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 flex flex-col gap-4">
+        {/* Navigation Switcher Tabs */}
+        <div className="flex items-center gap-1 bg-slate-900/90 p-1.5 rounded-2xl border border-slate-800 overflow-x-auto scrollbar-none">
+          <button
+            onClick={() => setStudentTab("chat")}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all flex-shrink-0 ${
+              studentTab === "chat"
+                ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Chat & Doubts ({messages.length})</span>
+          </button>
+          <button
+            onClick={() => setStudentTab("video")}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all flex-shrink-0 ${
+              studentTab === "video"
+                ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Video className="w-4 h-4" />
+            <span>WebRTC Video Grid</span>
+          </button>
+          <button
+            onClick={() => setStudentTab("whiteboard")}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all flex-shrink-0 ${
+              studentTab === "whiteboard"
+                ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>Whiteboard</span>
+          </button>
+          <button
+            onClick={() => setStudentTab("files")}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all flex-shrink-0 ${
+              studentTab === "files"
+                ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>Shared Files</span>
+          </button>
+          <button
+            onClick={() => setStudentTab("revision")}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all flex-shrink-0 ${
+              studentTab === "revision"
+                ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                : "text-indigo-400 hover:text-indigo-300"
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>Revision & Flashcards</span>
+          </button>
         </div>
-        {pushEnabled && (
-          <span className="flex items-center gap-1 text-[10px] text-emerald-400 flex-shrink-0">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-            </svg>
-            Alerts On
-          </span>
-        )}
-      </div>
 
-      {/* ── UPCOMING CLASSES BANNER ─────────────────────────────────────────── */}
-      {upcomingClasses.length > 0 && (
-        <div className="rounded-xl border border-indigo-500/25 bg-indigo-950/20 px-4 py-3 mb-4 animate-fade-in">
-          <p className="text-xs font-semibold text-indigo-300 mb-2 flex items-center gap-1.5">
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            Upcoming Classes ({upcomingClasses.length})
-          </p>
-          <div className="space-y-1.5">
-            {upcomingClasses.slice(0, 3).map((s) => (
-              <div key={s.id} className="flex items-center gap-3">
-                <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
-                <span className="text-xs text-slate-300 truncate flex-1">{s.title}</span>
-                <span className="text-[10px] text-slate-500 flex-shrink-0 tabular-nums">
-                  {new Date(s.scheduled_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                  {" · "}
-                  {new Date(s.scheduled_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── VIDEO GRID ─────────────────────────────────────────────────────── */}
-      {/* ── VIDEO ROOM (LiveKit SFU) ─────────────────────────────────────── */}
-      {showVideo && (
-        <div className="mb-4 animate-slide-up">
-          <LiveKitVideoRoom
+        {/* Live Captions Overlay if open */}
+        {showCaptions && (
+          <LiveCaptions
             roomId={roomId}
-            username={username}
-            isHost={false}
-            onDisconnect={() => setShowVideo(false)}
+            speakerName={username}
+            ws={wsRef.current}
+            canBroadcast={false}
           />
-        </div>
-      )}
+        )}
 
-      {/* ── ACTIVE POLL POPUP (slide-up overlay) ───────────────────────────── */}
-      {showPollCard && (
-        <div className="mb-4 animate-bounce-in">
-          <div className="rounded-2xl border border-blue-500/30 bg-gradient-to-br from-blue-950/40 to-indigo-950/20 p-5 relative">
-            {/* Dismiss button */}
-            <button
-              onClick={() => setPollDismissed(true)}
-              className="absolute top-3 right-3 text-slate-500 hover:text-slate-300 transition"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+        {/* Tab Content Panes */}
+        {studentTab === "chat" && (
+          <div className="flex-1 flex flex-col bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden min-h-[500px] shadow-xl">
+            {/* Chat Stream */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-6">
+                  <MessageSquare className="w-10 h-10 mb-2 text-slate-400" />
+                  <p className="text-sm font-semibold">No messages yet</p>
+                  <p className="text-xs text-slate-400">Ask a question or submit an anonymous doubt below!</p>
+                </div>
+              ) : (
+                messages.map((m, idx) => {
+                  const isOwn = m.username === username || m.raw_username === username;
+                  const isDoubtMsg = m.is_doubt;
+                  const isAnon = m.is_anonymous;
 
-            <div className="flex items-center gap-2 mb-3">
-              <span className="badge badge-blue text-[11px]">
-                <span className="animate-pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-blue-400" />
-                Live Classroom Poll
-              </span>
-              <span className="text-[11px] text-slate-500">{activePoll.total_votes} votes cast</span>
-            </div>
-
-            <p className="text-sm font-semibold text-slate-100 mb-3">{activePoll.question}</p>
-
-            {selectedVote ? (
-              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center animate-bounce-in">
-                <p className="text-emerald-400 text-sm font-semibold">
-                  ✓ Vote submitted: &ldquo;{selectedVote}&rdquo;
-                </p>
-                <p className="text-[11px] text-slate-500 mt-0.5">Results are visible to the instructor</p>
-              </div>
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-2">
-                {activePoll.options.map((opt, i) => (
-                  <button
-                    key={i}
-                    onClick={() => handleVote(opt)}
-                    className={`rounded-xl border px-4 py-3 text-sm font-medium text-left transition ${
-                      selectedVote === opt
-                        ? "bg-blue-600 border-blue-400 text-white"
-                        : "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800 hover:border-slate-600"
-                    }`}
-                  >
-                    {opt}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Live vote bars */}
-            {activePoll.total_votes > 0 && (
-              <div className="mt-4 space-y-2 border-t border-slate-800 pt-3">
-                {activePoll.options.map((opt, i) => {
-                  const pct = activePoll.total_votes > 0
-                    ? Math.round(((activePoll.votes[opt] ?? 0) / activePoll.total_votes) * 100)
-                    : 0;
                   return (
-                    <div key={i}>
-                      <div className="flex justify-between text-[11px] text-slate-400 mb-0.5">
-                        <span>{opt}</span>
-                        <span>{pct}%</span>
+                    <div
+                      key={idx}
+                      className={`flex flex-col ${isOwn ? "items-end" : "items-start"}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1 px-1">
+                        <span className="text-[11px] font-semibold text-slate-400">
+                          {isAnon ? "Anonymous Whisper" : m.username}
+                        </span>
+                        {isDoubtMsg && (
+                          <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold">
+                            Doubt
+                          </span>
+                        )}
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {m.timestamp ? new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                        </span>
                       </div>
-                      <div className="poll-bar">
-                        <div className="poll-bar-fill" style={{ width: `${pct}%` }} />
+
+                      <div
+                        className={`max-w-[85%] p-3 rounded-2xl text-xs sm:text-sm leading-relaxed ${
+                          isDoubtMsg
+                            ? "bg-amber-950/40 border border-amber-500/40 text-amber-100 shadow-sm"
+                            : isOwn
+                            ? "bg-blue-600 text-white rounded-tr-none shadow-md shadow-blue-600/20"
+                            : "bg-slate-950/80 border border-slate-800 text-slate-200 rounded-tl-none"
+                        }`}
+                      >
+                        {m.message}
                       </div>
                     </div>
                   );
-                })}
+                })
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input Controls with Whisper / Doubt Toggles */}
+            <div className="p-3 bg-slate-950/90 border-t border-slate-800 space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsDoubt(!isDoubt)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                      isDoubt
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm shadow-amber-500/20"
+                        : "bg-slate-900 text-slate-400 hover:text-slate-300 border border-slate-800"
+                    }`}
+                  >
+                    <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Doubt Mode</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsAnonymous(!isAnonymous)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                      isAnonymous
+                        ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/50 shadow-sm shadow-indigo-500/20"
+                        : "bg-slate-900 text-slate-400 hover:text-slate-300 border border-slate-800"
+                    }`}
+                  >
+                    <EyeOff className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Whisper Anonymously</span>
+                  </button>
+                </div>
+
+                <RaiseHand ws={wsRef.current} username={username} roomId={roomId} isHost={false} />
+              </div>
+
+              <form onSubmit={handleSendMessage} className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder={
+                    isDoubt
+                      ? "Submit a question or conceptual doubt to the instructor..."
+                      : isAnonymous
+                      ? "Whisper an anonymous doubt..."
+                      : "Type a message to the class..."
+                  }
+                  value={inputMsg}
+                  onChange={(e) => setInputMsg(e.target.value)}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs sm:text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-slate-400"
+                />
+                <button
+                  type="submit"
+                  disabled={!inputMsg.trim() || isSending}
+                  className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-all shadow-md shadow-blue-600/30"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {studentTab === "video" && (
+          <div className="flex-1 bg-slate-900/90 border border-slate-800 rounded-2xl p-4 min-h-[480px]">
+            <VideoGrid
+              ws={wsRef.current}
+              username={username}
+              roomId={roomId}
+              isVisible={true}
+            />
+          </div>
+        )}
+
+        {studentTab === "whiteboard" && (
+          <div className="flex-1 bg-slate-900/90 border border-slate-800 rounded-2xl p-4 min-h-[500px]">
+            <Whiteboard ws={wsRef.current} roomId={roomId} username={username} isHost={false} />
+          </div>
+        )}
+
+        {studentTab === "files" && (
+          <div className="flex-1 bg-slate-900/90 border border-slate-800 rounded-2xl p-4 min-h-[480px]">
+            <FileSharing roomId={roomId} isHost={false} ws={wsRef.current} />
+          </div>
+        )}
+
+        {studentTab === "revision" && (
+          <div className="flex-1">
+            <FlashcardDeck roomId={roomId} />
+          </div>
+        )}
+      </main>
+
+      {/* Active Poll Popup Modal */}
+      {activePoll && !pollDismissed && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <div className="w-full max-w-lg bg-slate-900 border border-indigo-500/50 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2 text-indigo-400">
+                <Vote className="w-5 h-5 animate-bounce" />
+                <h3 className="text-sm font-bold uppercase tracking-wider text-slate-200">
+                  Live Classroom Poll
+                </h3>
+              </div>
+              <button
+                onClick={() => setPollDismissed(true)}
+                className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-base font-semibold text-slate-100 mb-4">{activePoll.question}</p>
+
+            <div className="space-y-2 mb-4">
+              {activePoll.options.map((opt, idx) => {
+                const count = activePoll.votes?.[opt] || 0;
+                const total = activePoll.total_votes || 1;
+                const pct = Math.round((count / total) * 100);
+                const isSelected = selectedVote === opt;
+
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => handlePollVote(opt)}
+                    className={`w-full p-3 rounded-xl border text-left text-xs font-medium transition-all relative overflow-hidden flex items-center justify-between ${
+                      isSelected
+                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-200"
+                        : "bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-300"
+                    }`}
+                  >
+                    <div
+                      className="absolute inset-0 bg-indigo-500/10 pointer-events-none transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                    />
+                    <span className="relative z-10 flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-slate-800 text-slate-300 text-[10px] font-bold flex items-center justify-center">
+                        {String.fromCharCode(65 + idx)}
+                      </span>
+                      {opt}
+                    </span>
+                    <span className="relative z-10 font-mono text-[11px] text-slate-400 font-bold">
+                      {pct}%
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
+              <span>{activePoll.total_votes} total votes submitted</span>
+              <button
+                onClick={() => setPollDismissed(true)}
+                className="text-indigo-400 hover:text-indigo-300 font-medium"
+              >
+                Minimize Poll
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 1-Click "Catch Me Up" Summary Modal */}
+      {showCatchUpModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 text-indigo-400">
+                <Sparkles className="w-5 h-5" />
+                <h3 className="text-sm font-bold text-slate-100">AI Catch Me Up</h3>
+              </div>
+              <button
+                onClick={() => setShowCatchUpModal(false)}
+                className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {catchUpLoading ? (
+              <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-slate-400">
+                <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                <span>Reading recent lecture dialogue...</span>
+              </div>
+            ) : (
+              <div className="space-y-3 mb-5">
+                <p className="text-xs text-slate-400">Here is what happened in the lecture recently:</p>
+                <ul className="space-y-2.5 text-xs text-slate-200">
+                  {catchUpBullets.map((bullet, idx) => (
+                    <li key={idx} className="flex items-start gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800">
+                      <span className="text-indigo-400 font-bold mt-0.5">•</span>
+                      <span>{bullet}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
+
+            <button
+              onClick={() => setShowCatchUpModal(false)}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all shadow-md shadow-indigo-600/30"
+            >
+              Got It, Back to Class
+            </button>
           </div>
         </div>
       )}
-
-      {/* ── INTERACTION & DOUBTS WIDGET ─────────────────────────────────── */}
-      <div className="mb-4 animate-fade-in">
-        <RaiseHand
-          username={username}
-          roomId={roomId}
-          isHost={false}
-          ws={wsRef.current}
-        />
-      </div>
-
-      {/* ── TAB SELECTOR (Discussion / Whiteboard / Files) ───────────────────── */}
-      <div className="flex gap-2 mb-4 bg-slate-900 border border-slate-800 p-1 rounded-xl">
-        <button
-          onClick={() => setStudentTab("chat")}
-          className={`flex-1 py-2 rounded-lg text-xs font-semibold transition ${
-            studentTab === "chat"
-              ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
-              : "text-slate-400 hover:text-white"
-          }`}
-        >
-          💬 Live Chat
-        </button>
-        <button
-          onClick={() => setStudentTab("whiteboard")}
-          className={`flex-1 py-2 rounded-lg text-xs font-semibold transition ${
-            studentTab === "whiteboard"
-              ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
-              : "text-slate-400 hover:text-white"
-          }`}
-        >
-          🖊️ Whiteboard
-        </button>
-        <button
-          onClick={() => setStudentTab("files")}
-          className={`flex-1 py-2 rounded-lg text-xs font-semibold transition ${
-            studentTab === "files"
-              ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
-              : "text-slate-400 hover:text-white"
-          }`}
-        >
-          📁 Shared Files
-        </button>
-      </div>
-
-      {/* ── WHITEBOARD VIEW ─────────────────────────────────────────────────── */}
-      {studentTab === "whiteboard" && (
-        <div className="mb-4 animate-fade-in">
-          <Whiteboard
-            roomId={roomId}
-            username={username}
-            isHost={false}
-            ws={wsRef.current}
-          />
-        </div>
-      )}
-
-      {/* ── SHARED FILES VIEW ───────────────────────────────────────────────── */}
-      {studentTab === "files" && (
-        <div className="mb-4 animate-fade-in">
-          <FileSharing
-            roomId={roomId}
-            isHost={false}
-            ws={wsRef.current}
-          />
-        </div>
-      )}
-
-      {/* ── CHAT STREAM ────────────────────────────────────────────────────── */}
-      {studentTab === "chat" && (
-        <div className="flex-1 flex flex-col rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden animate-fade-in delay-150" style={{ minHeight: "380px" }}>
-          <div className="px-4 py-3 border-b border-slate-800 flex items-center gap-2 flex-shrink-0">
-            <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-            </svg>
-            <span className="text-sm font-medium">Class Discussion</span>
-            <span className="ml-auto text-[11px] text-slate-500">{messages.filter(m => m.type === "message").length} messages</span>
-          </div>
-
-
-        {/* Messages scroll area */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-12">
-              <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center">
-                <svg className="w-6 h-6 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                </svg>
-              </div>
-              <p className="text-sm text-slate-500">Class hasn&apos;t started yet.</p>
-              <p className="text-xs text-slate-600">Be the first to ask a question!</p>
-            </div>
-          ) : (
-            messages.map((m, i) => {
-              const isMine = m.username === username;
-              return (
-                <div key={i} className="animate-fade-in" style={{ animationDelay: `${Math.min(i * 30, 200)}ms` }}>
-                  {m.type === "system" ? (
-                    <div className="chat-bubble-system mx-auto w-fit">
-                      {m.message}
-                    </div>
-                  ) : (
-                    <div className={`flex items-end gap-2 ${isMine ? "flex-row-reverse" : ""}`}>
-                      {!isMine && (
-                        <div className={`avatar avatar-sm flex-shrink-0 ${getAvatarColor(m.username ?? "?")}`}>
-                          {getInitials(m.username ?? "?")}
-                        </div>
-                      )}
-                      <div className={`${isMine ? "chat-bubble-self ml-auto" : "chat-bubble-other"} px-3.5 py-2.5 max-w-[80%]`}>
-                        {!isMine && (
-                          <div className="flex items-center gap-1.5 mb-1">
-                            <span className="text-[11px] font-semibold text-blue-400">{m.username}</span>
-                            {m.message.includes("?") && (
-                              <span className="badge badge-amber text-[9px] py-0 px-1">Question</span>
-                            )}
-                          </div>
-                        )}
-                        <p className="text-sm text-slate-100 leading-relaxed">{m.message}</p>
-                        <p className="text-[10px] text-slate-500 mt-0.5 text-right">
-                          {new Date(m.timestamp).toLocaleTimeString()}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-          <div ref={chatEndRef} />
-        </div>
-
-        {/* Message Input */}
-        <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-800 flex gap-2 flex-shrink-0 bg-slate-950/60">
-          <input
-            type="text"
-            value={inputMsg}
-            onChange={(e) => setInputMsg(e.target.value)}
-            placeholder="Ask a question or share feedback..."
-            className="input-field flex-1 py-2.5"
-          />
-          <button
-            type="submit"
-            disabled={!inputMsg.trim() || isSending}
-            className="btn-primary py-2.5 px-4 text-sm"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-          </button>
-        </form>
-      </div>
-      )}
-
-      {/* ── BOTTOM STATUS ──────────────────────────────────────────────────── */}
-
-      <p className="text-center text-[11px] text-slate-600 mt-3">
-        Your instructor can see your messages in real-time via the ClassPulse AI dashboard.
-      </p>
-
-      {/* ── Global toast notification stack ─────────────────────────────────── */}
-      <NotificationToast toasts={toasts} onClose={removeToast} />
-
-    </main>
+    </div>
   );
 }

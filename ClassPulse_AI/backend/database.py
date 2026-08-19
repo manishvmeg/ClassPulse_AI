@@ -1,8 +1,10 @@
+import csv
+import io
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -24,6 +26,7 @@ else:
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
+        pool_recycle=300,
     )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -34,58 +37,85 @@ Base = declarative_base()
 # ORM Models
 # ──────────────────────────────────────────────────────────────────────────────
 
-class RoomRecord(Base):
+class Room(Base):
     """Classroom metadata and management."""
     __tablename__ = "rooms"
 
-    id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(String(64), unique=True, index=True, nullable=False)
+    id = Column(String(64), primary_key=True, index=True)
+    name = Column(String(256), default="Interactive Classroom")
     title = Column(String(256), default="Interactive Classroom")
     teacher_id = Column(String(128), nullable=True, index=True)
     teacher_name = Column(String(64), default="Instructor")
+    is_active = Column(Boolean, default=True)
     is_locked = Column(Boolean, default=False)
     max_students = Column(Integer, default=500)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+# Alias for backward compatibility
+RoomRecord = Room
+
+
 class MessageRecord(Base):
     __tablename__ = "messages"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     room_id = Column(String(64), index=True, nullable=False)
     username = Column(String(64), nullable=False)
     message = Column(Text, nullable=False)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
-
-
-class InsightRecord(Base):
-    __tablename__ = "insights"
-
-    id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(String(64), index=True, nullable=False)
-    raw_json = Column(Text, nullable=False)
+    is_doubt = Column(Boolean, default=False, index=True)
+    is_anonymous = Column(Boolean, default=False)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class PollRecord(Base):
     __tablename__ = "polls"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     room_id = Column(String(64), index=True, nullable=False)
     question = Column(Text, nullable=False)
-    options_json = Column(Text, nullable=False)
+    options = Column(Text, nullable=True)       # JSON-encoded array of options
+    options_json = Column(Text, nullable=True)  # Legacy compatibility
+    votes = Column(Text, nullable=True)        # JSON-encoded dictionary of vote counts
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 
 
 class VoteRecord(Base):
     __tablename__ = "votes"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     poll_id = Column(Integer, index=True, nullable=False)
     username = Column(String(64), nullable=False)
     selected_option = Column(String(256), nullable=False)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+
+class AttendanceRecord(Base):
+    __tablename__ = "attendance"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    room_id = Column(String(64), index=True, nullable=False)
+    username = Column(String(64), index=True, nullable=False)
+    joined_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    left_at = Column(DateTime(timezone=True), nullable=True)
+    total_messages = Column(Integer, default=0)
+    polls_voted = Column(Integer, default=0)
+
+
+class InsightRecord(Base):
+    __tablename__ = "insights"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    room_id = Column(String(64), index=True, nullable=False)
+    summary = Column(Text, nullable=False)
+    sentiment = Column(String(64), default="Neutral")
+    friction_points = Column(Text, nullable=True)  # JSON-encoded array of strings
+    recommendation = Column(Text, nullable=True)
+    raw_json = Column(Text, nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class ClassSchedule(Base):
@@ -150,19 +180,109 @@ class SharedFileRecord(Base):
 # Create all tables (idempotent)
 Base.metadata.create_all(bind=engine)
 
+from sqlalchemy import text
+
+# Auto-migrate missing columns for SQLite
+if DATABASE_URL.startswith("sqlite"):
+    with engine.connect() as conn:
+        for table, col, col_type in [
+            ("rooms", "name", "VARCHAR(256) DEFAULT 'Interactive Classroom'"),
+            ("rooms", "is_active", "BOOLEAN DEFAULT 1"),
+            ("messages", "is_doubt", "BOOLEAN DEFAULT 0"),
+            ("messages", "is_anonymous", "BOOLEAN DEFAULT 0"),
+            ("polls", "options", "TEXT DEFAULT '[]'"),
+            ("polls", "votes", "TEXT DEFAULT '{}'"),
+            ("insights", "summary", "TEXT DEFAULT ''"),
+            ("insights", "friction_points", "TEXT"),
+            ("insights", "recommendation", "TEXT"),
+            ("insights", "sentiment", "VARCHAR(64) DEFAULT 'Neutral'"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                conn.commit()
+            except Exception:
+                pass
+        # Copy legacy options_json if exists
+        try:
+            conn.execute(text("UPDATE polls SET options = options_json WHERE options IS NULL OR options = '[]'"))
+            conn.commit()
+        except Exception:
+            pass
+
+
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Existing CRUD helpers (unchanged)
+# Room CRUD Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def save_message(room_id: str, username: str, message: str, timestamp_str: Optional[str] = None):
+def get_or_create_room(room_id: str, name: Optional[str] = None, teacher_name: str = "Instructor") -> Room:
+    db = SessionLocal()
+    try:
+        room = db.query(Room).filter(Room.id == str(room_id)).first()
+        if not room:
+            room = Room(
+                id=str(room_id),
+                name=name or f"Room {room_id.upper()}",
+                title=name or f"Room {room_id.upper()}",
+                teacher_name=teacher_name,
+                is_active=True,
+            )
+            db.add(room)
+            db.commit()
+            db.refresh(room)
+        return room
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Message & Doubt CRUD Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_message(
+    room_id: str,
+    username: str,
+    message: str,
+    is_doubt: bool = False,
+    is_anonymous: bool = False,
+    timestamp_str: Optional[str] = None,
+) -> dict:
     db = SessionLocal()
     try:
         ts = datetime.fromisoformat(timestamp_str) if timestamp_str else datetime.now(timezone.utc)
-        record = MessageRecord(room_id=room_id, username=username, message=message, timestamp=ts)
+        record = MessageRecord(
+            room_id=str(room_id),
+            username=username,
+            message=message,
+            is_doubt=is_doubt,
+            is_anonymous=is_anonymous,
+            timestamp=ts,
+        )
         db.add(record)
         db.commit()
+        db.refresh(record)
+
+        # Track message count in attendance
+        if not is_anonymous and username != "System" and username != "Teacher" and username != "Instructor":
+            att = db.query(AttendanceRecord).filter(
+                AttendanceRecord.room_id == str(room_id),
+                AttendanceRecord.username == username,
+            ).order_by(AttendanceRecord.joined_at.desc()).first()
+            if att:
+                att.total_messages += 1
+                db.commit()
+
+        return {
+            "id": record.id,
+            "room_id": record.room_id,
+            "username": "Anonymous" if is_anonymous else record.username,
+            "message": record.message,
+            "is_doubt": record.is_doubt,
+            "is_anonymous": record.is_anonymous,
+            "timestamp": record.timestamp.isoformat(),
+        }
     finally:
         db.close()
 
@@ -174,80 +294,178 @@ def get_stored_messages(
 ) -> List[dict]:
     db = SessionLocal()
     try:
-        query = db.query(MessageRecord).filter(MessageRecord.room_id == room_id)
+        query = db.query(MessageRecord).filter(MessageRecord.room_id == str(room_id))
         if start_time:
             query = query.filter(MessageRecord.timestamp >= datetime.fromisoformat(start_time))
         if end_time:
             query = query.filter(MessageRecord.timestamp <= datetime.fromisoformat(end_time))
         records = query.order_by(MessageRecord.timestamp.asc()).all()
         return [
-            {"username": rec.username, "message": rec.message, "timestamp": rec.timestamp.isoformat()}
+            {
+                "id": rec.id,
+                "username": "Anonymous" if rec.is_anonymous else rec.username,
+                "raw_username": rec.username,
+                "message": rec.message,
+                "is_doubt": bool(rec.is_doubt),
+                "is_anonymous": bool(rec.is_anonymous),
+                "timestamp": rec.timestamp.isoformat(),
+            }
             for rec in records
         ]
     finally:
         db.close()
 
 
+def get_doubts(room_id: str) -> List[dict]:
+    db = SessionLocal()
+    try:
+        records = db.query(MessageRecord).filter(
+            MessageRecord.room_id == str(room_id),
+            MessageRecord.is_doubt == True,
+        ).order_by(MessageRecord.timestamp.desc()).all()
+        return [
+            {
+                "id": rec.id,
+                "username": "Anonymous" if rec.is_anonymous else rec.username,
+                "message": rec.message,
+                "is_anonymous": bool(rec.is_anonymous),
+                "timestamp": rec.timestamp.isoformat(),
+            }
+            for rec in records
+        ]
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Polling CRUD Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
 def create_poll(room_id: str, question: str, options: List[str]) -> dict:
     db = SessionLocal()
     try:
-        db.query(PollRecord).filter(PollRecord.room_id == room_id, PollRecord.is_active == True).update({"is_active": False})
-        poll = PollRecord(room_id=room_id, question=question, options_json=json.dumps(options), is_active=True)
+        # Deactivate previous active polls for this room
+        db.query(PollRecord).filter(
+            PollRecord.room_id == str(room_id),
+            PollRecord.is_active == True,
+        ).update({"is_active": False})
+
+        initial_votes = {opt: 0 for opt in options}
+
+        poll = PollRecord(
+            room_id=str(room_id),
+            question=question,
+            options=json.dumps(options),
+            options_json=json.dumps(options),
+            votes=json.dumps(initial_votes),
+            is_active=True,
+        )
         db.add(poll)
         db.commit()
         db.refresh(poll)
+
         return {
-            "id": poll.id, "room_id": poll.room_id, "question": poll.question,
-            "options": json.loads(poll.options_json), "is_active": poll.is_active,
-            "votes": {opt: 0 for opt in options}, "total_votes": 0,
+            "id": poll.id,
+            "room_id": poll.room_id,
+            "question": poll.question,
+            "options": options,
+            "is_active": poll.is_active,
+            "votes": initial_votes,
+            "total_votes": 0,
+            "created_at": poll.created_at.isoformat() if poll.created_at else datetime.now(timezone.utc).isoformat(),
         }
     finally:
         db.close()
 
 
-def record_vote(poll_id: int, username: str, selected_option: str) -> Optional[dict]:
+def record_vote(poll_id: Union[str, int], username: str, selected_option: str) -> Optional[dict]:
     db = SessionLocal()
     try:
-        poll = db.query(PollRecord).filter(PollRecord.id == poll_id, PollRecord.is_active == True).first()
+        try:
+            pid = int(poll_id)
+        except Exception:
+            return None
+
+        poll = db.query(PollRecord).filter(PollRecord.id == pid, PollRecord.is_active == True).first()
         if not poll:
             return None
-        existing_vote = db.query(VoteRecord).filter(VoteRecord.poll_id == poll_id, VoteRecord.username == username).first()
+
+        # Check existing vote
+        existing_vote = db.query(VoteRecord).filter(
+            VoteRecord.poll_id == pid,
+            VoteRecord.username == username,
+        ).first()
+
+        is_new_vote = False
         if existing_vote:
             existing_vote.selected_option = selected_option
+            existing_vote.timestamp = datetime.now(timezone.utc)
         else:
-            db.add(VoteRecord(poll_id=poll_id, username=username, selected_option=selected_option))
+            db.add(VoteRecord(poll_id=pid, username=username, selected_option=selected_option))
+            is_new_vote = True
+
         db.commit()
-        return get_poll_results(poll_id)
+
+        # Update attendance polls_voted counter if new
+        if is_new_vote and username not in ("Teacher", "Instructor", "System"):
+            att = db.query(AttendanceRecord).filter(
+                AttendanceRecord.room_id == poll.room_id,
+                AttendanceRecord.username == username,
+            ).order_by(AttendanceRecord.joined_at.desc()).first()
+            if att:
+                att.polls_voted += 1
+                db.commit()
+
+        return get_poll_results(pid)
     finally:
         db.close()
 
 
-def get_poll_results(poll_id: int) -> Optional[dict]:
+def get_poll_results(poll_id: Union[str, int]) -> Optional[dict]:
     db = SessionLocal()
     try:
-        poll = db.query(PollRecord).filter(PollRecord.id == poll_id).first()
+        try:
+            pid = int(poll_id)
+        except Exception:
+            return None
+
+        poll = db.query(PollRecord).filter(PollRecord.id == pid).first()
         if not poll:
             return None
-        options = json.loads(poll.options_json)
-        votes = db.query(VoteRecord).filter(VoteRecord.poll_id == poll_id).all()
+
+        options = json.loads(poll.options)
+        votes = db.query(VoteRecord).filter(VoteRecord.poll_id == pid).all()
+
         tally = {opt: 0 for opt in options}
         for v in votes:
             if v.selected_option in tally:
                 tally[v.selected_option] += 1
+
+        total = len(votes)
+        poll.votes = json.dumps(tally)
+        db.commit()
+
         return {
-            "id": poll.id, "room_id": poll.room_id, "question": poll.question,
-            "options": options, "is_active": poll.is_active,
-            "votes": tally, "total_votes": len(votes),
+            "id": poll.id,
+            "room_id": poll.room_id,
+            "question": poll.question,
+            "options": options,
+            "is_active": poll.is_active,
+            "votes": tally,
+            "total_votes": total,
+            "created_at": poll.created_at.isoformat() if poll.created_at else datetime.now(timezone.utc).isoformat(),
         }
     finally:
         db.close()
+
 
 
 def get_active_poll(room_id: str) -> Optional[dict]:
     db = SessionLocal()
     try:
         poll = db.query(PollRecord).filter(
-            PollRecord.room_id == room_id, PollRecord.is_active == True
+            PollRecord.room_id == str(room_id),
+            PollRecord.is_active == True,
         ).order_by(PollRecord.created_at.desc()).first()
         return get_poll_results(poll.id) if poll else None
     finally:
@@ -255,7 +473,295 @@ def get_active_poll(room_id: str) -> Optional[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Schedule CRUD helpers
+# Attendance & Student Metrics Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def record_attendance_join(room_id: str, username: str):
+    if not username or username in ("System", "Teacher", "Instructor"):
+        return
+    db = SessionLocal()
+    try:
+        # Check if an open attendance session exists
+        existing = db.query(AttendanceRecord).filter(
+            AttendanceRecord.room_id == str(room_id),
+            AttendanceRecord.username == username,
+            AttendanceRecord.left_at.is_(None),
+        ).first()
+
+        if not existing:
+            rec = AttendanceRecord(
+                room_id=str(room_id),
+                username=username,
+                joined_at=datetime.now(timezone.utc),
+                total_messages=0,
+                polls_voted=0,
+            )
+            db.add(rec)
+            db.commit()
+    finally:
+        db.close()
+
+
+def record_attendance_leave(room_id: str, username: str):
+    if not username or username in ("System", "Teacher", "Instructor"):
+        return
+    db = SessionLocal()
+    try:
+        existing = db.query(AttendanceRecord).filter(
+            AttendanceRecord.room_id == str(room_id),
+            AttendanceRecord.username == username,
+            AttendanceRecord.left_at.is_(None),
+        ).order_by(AttendanceRecord.joined_at.desc()).first()
+
+        if existing:
+            existing.left_at = datetime.now(timezone.utc)
+            db.commit()
+    finally:
+        db.close()
+
+
+def get_room_attendance(room_id: str) -> List[dict]:
+    db = SessionLocal()
+    try:
+        records = db.query(AttendanceRecord).filter(
+            AttendanceRecord.room_id == str(room_id)
+        ).order_by(AttendanceRecord.joined_at.desc()).all()
+        return [
+            {
+                "id": r.id,
+                "room_id": r.room_id,
+                "username": r.username,
+                "joined_at": r.joined_at.isoformat() if r.joined_at else "",
+                "left_at": r.left_at.isoformat() if r.left_at else None,
+                "total_messages": r.total_messages,
+                "polls_voted": r.polls_voted,
+            }
+            for r in records
+        ]
+    finally:
+        db.close()
+
+
+def increment_attendance_messages(room_id: str, username: str):
+    if not username or username in ("System", "Teacher", "Instructor", "Anonymous"):
+        return
+    db = SessionLocal()
+    try:
+        att = db.query(AttendanceRecord).filter(
+            AttendanceRecord.room_id == str(room_id),
+            AttendanceRecord.username == username,
+        ).order_by(AttendanceRecord.joined_at.desc()).first()
+        if att:
+            att.total_messages += 1
+            db.commit()
+    finally:
+        db.close()
+
+
+def increment_attendance_votes(room_id: str, username: str):
+    if not username or username in ("System", "Teacher", "Instructor", "Anonymous"):
+        return
+    db = SessionLocal()
+    try:
+        att = db.query(AttendanceRecord).filter(
+            AttendanceRecord.room_id == str(room_id),
+            AttendanceRecord.username == username,
+        ).order_by(AttendanceRecord.joined_at.desc()).first()
+        if att:
+            att.polls_voted += 1
+            db.commit()
+    finally:
+        db.close()
+
+
+
+def get_student_metrics(room_id: str) -> List[dict]:
+    """
+    Aggregates student metrics: message counts, questions asked, poll participation,
+    and dynamically assigned badges.
+    """
+    db = SessionLocal()
+    try:
+        # Get all attendance records for this room
+        attendance_rows = db.query(AttendanceRecord).filter(AttendanceRecord.room_id == str(room_id)).all()
+        # Also get all messages
+        messages = db.query(MessageRecord).filter(MessageRecord.room_id == str(room_id)).all()
+        # Active polls count
+        total_polls = db.query(PollRecord).filter(PollRecord.room_id == str(room_id)).count()
+
+        user_stats: Dict[str, dict] = {}
+
+        for att in attendance_rows:
+            if att.username in ("System", "Teacher", "Instructor", "Anonymous"):
+                continue
+            if att.username not in user_stats:
+                user_stats[att.username] = {
+                    "username": att.username,
+                    "message_count": 0,
+                    "doubt_count": 0,
+                    "questions_asked": [],
+                    "polls_voted": 0,
+                    "joined_at": att.joined_at.isoformat() if att.joined_at else "",
+                    "is_online": att.left_at is None,
+                }
+            user_stats[att.username]["polls_voted"] = max(user_stats[att.username]["polls_voted"], att.polls_voted)
+
+        # Count from messages
+        for msg in messages:
+            u = msg.username
+            if u in ("System", "Teacher", "Instructor", "Anonymous"):
+                continue
+            if u not in user_stats:
+                user_stats[u] = {
+                    "username": u,
+                    "message_count": 0,
+                    "doubt_count": 0,
+                    "questions_asked": [],
+                    "polls_voted": 0,
+                    "joined_at": msg.timestamp.isoformat(),
+                    "is_online": True,
+                }
+            user_stats[u]["message_count"] += 1
+            if msg.is_doubt:
+                user_stats[u]["doubt_count"] += 1
+                user_stats[u]["questions_asked"].append(msg.message)
+            elif "?" in msg.message:
+                user_stats[u]["questions_asked"].append(msg.message)
+
+        # Assign Dynamic Badges:
+        # - Inquisitive: Asked doubts or 2+ questions
+        # - Highly Active: > 5 messages
+        # - Engaged Voter: Voted in polls
+        # - Observer: Joined but few messages
+        metrics_list = []
+        for u, stats in user_stats.items():
+            badge = "Observer"
+            if stats["doubt_count"] > 0 or len(stats["questions_asked"]) >= 2:
+                badge = "Inquisitive"
+            elif stats["message_count"] >= 5:
+                badge = "Highly Active"
+            elif stats["polls_voted"] > 0 or (total_polls > 0 and stats["polls_voted"] >= total_polls):
+                badge = "Engaged Voter"
+
+            metrics_list.append({
+                "username": u,
+                "message_count": stats["message_count"],
+                "doubt_count": stats["doubt_count"],
+                "questions_asked": stats["questions_asked"][:5],
+                "polls_voted": stats["polls_voted"],
+                "voted": stats["polls_voted"] > 0,
+                "badge": badge,
+                "is_online": stats["is_online"],
+                "joined_at": stats["joined_at"],
+            })
+
+        return sorted(metrics_list, key=lambda x: (x["message_count"] + x["polls_voted"] * 2), reverse=True)
+    finally:
+        db.close()
+
+
+def export_attendance_csv(room_id: str) -> str:
+    """
+    Generates CSV formatted text for room attendance and metrics.
+    """
+    metrics = get_student_metrics(room_id)
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Room ID",
+        "Student Username",
+        "Badge / Persona",
+        "Total Messages",
+        "Doubts / Questions Asked",
+        "Polls Participated",
+        "Status",
+        "Joined At",
+    ])
+
+    for m in metrics:
+        writer.writerow([
+            room_id,
+            m["username"],
+            m["badge"],
+            m["message_count"],
+            m["doubt_count"] or len(m["questions_asked"]),
+            m["polls_voted"],
+            "Active Online" if m.get("is_online") else "Left Session",
+            m.get("joined_at", ""),
+        ])
+
+    return output.getvalue()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Insights CRUD Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_insight(
+    room_id: str,
+    summary: str,
+    sentiment: str,
+    friction_points: Union[List[str], str],
+    recommendation: str,
+    raw_json: Optional[str] = None,
+) -> dict:
+    db = SessionLocal()
+    try:
+        friction_str = json.dumps(friction_points) if isinstance(friction_points, list) else str(friction_points)
+        rec = InsightRecord(
+            room_id=str(room_id),
+            summary=summary,
+            sentiment=sentiment,
+            friction_points=friction_str,
+            recommendation=recommendation,
+            raw_json=raw_json,
+        )
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+        return {
+            "id": rec.id,
+            "room_id": rec.room_id,
+            "summary": rec.summary,
+            "sentiment": rec.sentiment,
+            "friction_points": friction_points if isinstance(friction_points, list) else json.loads(friction_str),
+            "recommendation": rec.recommendation,
+            "timestamp": rec.timestamp.isoformat(),
+        }
+    finally:
+        db.close()
+
+
+def get_latest_insight(room_id: str) -> Optional[dict]:
+    db = SessionLocal()
+    try:
+        rec = db.query(InsightRecord).filter(
+            InsightRecord.room_id == str(room_id)
+        ).order_by(InsightRecord.timestamp.desc()).first()
+        if not rec:
+            return None
+        f_points = []
+        if rec.friction_points:
+            try:
+                f_points = json.loads(rec.friction_points)
+            except Exception:
+                f_points = [rec.friction_points]
+        return {
+            "id": rec.id,
+            "room_id": rec.room_id,
+            "summary": rec.summary,
+            "sentiment": rec.sentiment,
+            "friction_points": f_points,
+            "recommendation": rec.recommendation or "",
+            "timestamp": rec.timestamp.isoformat(),
+        }
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Schedule & Push CRUD Helpers (Preserved)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def schedule_to_dict(s: ClassSchedule) -> dict:
@@ -284,7 +790,7 @@ def create_schedule(
     db = SessionLocal()
     try:
         record = ClassSchedule(
-            room_id=room_id,
+            room_id=str(room_id),
             title=title,
             description=description,
             scheduled_at=scheduled_at,
@@ -300,15 +806,13 @@ def create_schedule(
         db.close()
 
 
-def get_schedules(room_id: Optional[str] = None, upcoming_only: bool = False) -> List[dict]:
+def get_schedules(room_id: Optional[str] = None) -> List[dict]:
     db = SessionLocal()
     try:
-        query = db.query(ClassSchedule)
+        q = db.query(ClassSchedule)
         if room_id:
-            query = query.filter(ClassSchedule.room_id == room_id)
-        if upcoming_only:
-            query = query.filter(ClassSchedule.scheduled_at >= datetime.now(timezone.utc))
-        records = query.order_by(ClassSchedule.scheduled_at.asc()).all()
+            q = q.filter(ClassSchedule.room_id == str(room_id))
+        records = q.order_by(ClassSchedule.scheduled_at.asc()).all()
         return [schedule_to_dict(r) for r in records]
     finally:
         db.close()
@@ -327,14 +831,15 @@ def delete_schedule(schedule_id: int) -> bool:
         db.close()
 
 
-def get_schedules_due_for_reminder(window_start: datetime, window_end: datetime) -> List[ClassSchedule]:
-    """Return schedules whose start time falls in the given window and haven't been reminded yet."""
+def get_schedules_due_for_reminder(within_minutes: int = 5) -> List[ClassSchedule]:
     db = SessionLocal()
     try:
+        now = datetime.now(timezone.utc)
+        target = now + timedelta(minutes=within_minutes)
         return db.query(ClassSchedule).filter(
-            ClassSchedule.scheduled_at >= window_start,
-            ClassSchedule.scheduled_at <= window_end,
             ClassSchedule.reminder_sent == False,
+            ClassSchedule.scheduled_at >= now,
+            ClassSchedule.scheduled_at <= target,
         ).all()
     finally:
         db.close()
@@ -343,147 +848,157 @@ def get_schedules_due_for_reminder(window_start: datetime, window_end: datetime)
 def mark_reminder_sent(schedule_id: int):
     db = SessionLocal()
     try:
-        db.query(ClassSchedule).filter(ClassSchedule.id == schedule_id).update({"reminder_sent": True})
-        db.commit()
+        rec = db.query(ClassSchedule).filter(ClassSchedule.id == schedule_id).first()
+        if rec:
+            rec.reminder_sent = True
+            db.commit()
     finally:
         db.close()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Push Subscription CRUD helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def upsert_push_subscription(endpoint: str, auth: str, p256dh: str, username: str, role: str, room_id: Optional[str]) -> dict:
-    db = SessionLocal()
-    try:
-        existing = db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).first()
-        if existing:
-            existing.keys_auth = auth
-            existing.keys_p256dh = p256dh
-            existing.username = username
-            existing.role = role
-            existing.room_id = room_id
-        else:
-            existing = PushSubscription(
-                endpoint=endpoint, keys_auth=auth, keys_p256dh=p256dh,
-                username=username, role=role, room_id=room_id,
-            )
-            db.add(existing)
-        db.commit()
-        return {"ok": True}
-    finally:
-        db.close()
-
-
-def delete_push_subscription(endpoint: str):
-    db = SessionLocal()
-    try:
-        db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).delete()
-        db.commit()
-    finally:
-        db.close()
-
-
-def get_all_push_subscriptions() -> List[PushSubscription]:
-    db = SessionLocal()
-    try:
-        return db.query(PushSubscription).all()
-    finally:
-        db.close()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Subscription CRUD helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def upsert_user_subscription(
-    clerk_user_id: str,
-    customer_email: str,
-    plan: str = "free",
-    stripe_customer_id: Optional[str] = None,
-    stripe_subscription_id: Optional[str] = None,
-    status: str = "active",
-    current_period_end: Optional[datetime] = None,
+def upsert_push_subscription(
+    endpoint: str,
+    keys_auth: str,
+    keys_p256dh: str,
+    username: str,
+    role: str = "student",
+    room_id: Optional[str] = None,
 ) -> dict:
     db = SessionLocal()
     try:
-        sub = db.query(UserSubscription).filter(UserSubscription.clerk_user_id == clerk_user_id).first()
-        if not sub:
-            sub = UserSubscription(
-                clerk_user_id=clerk_user_id,
-                customer_email=customer_email,
-                plan=plan,
-                stripe_customer_id=stripe_customer_id,
-                stripe_subscription_id=stripe_subscription_id,
-                status=status,
-                current_period_end=current_period_end,
+        sub = db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).first()
+        if sub:
+            sub.keys_auth = keys_auth
+            sub.keys_p256dh = keys_p256dh
+            sub.username = username
+            sub.role = role
+            sub.room_id = str(room_id) if room_id else None
+        else:
+            sub = PushSubscription(
+                endpoint=endpoint,
+                keys_auth=keys_auth,
+                keys_p256dh=keys_p256dh,
+                username=username,
+                role=role,
+                room_id=str(room_id) if room_id else None,
             )
             db.add(sub)
-        else:
-            sub.customer_email = customer_email
-            sub.plan = plan
-            if stripe_customer_id:
-                sub.stripe_customer_id = stripe_customer_id
-            if stripe_subscription_id:
-                sub.stripe_subscription_id = stripe_subscription_id
-            sub.status = status
-            if current_period_end:
-                sub.current_period_end = current_period_end
         db.commit()
         db.refresh(sub)
-        return {
-            "clerk_user_id": sub.clerk_user_id,
-            "plan": sub.plan,
-            "status": sub.status,
-            "stripe_customer_id": sub.stripe_customer_id,
-        }
+        return {"id": sub.id, "endpoint": sub.endpoint, "username": sub.username}
     finally:
         db.close()
 
 
-def get_user_subscription(clerk_user_id: str) -> dict:
+def delete_push_subscription(endpoint: str) -> bool:
+    db = SessionLocal()
+    try:
+        sub = db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).first()
+        if not sub:
+            return False
+        db.delete(sub)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def get_all_push_subscriptions(role: Optional[str] = None, room_id: Optional[str] = None) -> List[PushSubscription]:
+    db = SessionLocal()
+    try:
+        q = db.query(PushSubscription)
+        if role:
+            q = q.filter(PushSubscription.role == role)
+        if room_id:
+            q = q.filter((PushSubscription.room_id == str(room_id)) | (PushSubscription.room_id.is_(None)))
+        return q.all()
+    finally:
+        db.close()
+
+
+def get_user_subscription(clerk_user_id: str) -> Optional[dict]:
     db = SessionLocal()
     try:
         sub = db.query(UserSubscription).filter(UserSubscription.clerk_user_id == clerk_user_id).first()
         if not sub:
-            return {"plan": "free", "status": "active", "stripe_customer_id": None}
+            return None
         return {
             "clerk_user_id": sub.clerk_user_id,
             "customer_email": sub.customer_email,
             "plan": sub.plan,
             "status": sub.status,
-            "stripe_customer_id": sub.stripe_customer_id,
             "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
         }
     finally:
         db.close()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Shared Files CRUD helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def record_shared_file(room_id: str, filename: str, file_url: str, file_size: int, uploader: str = "Instructor") -> dict:
+def upsert_user_subscription(
+    clerk_user_id: str,
+    customer_email: str,
+    plan: str,
+    status: str = "active",
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    current_period_end: Optional[datetime] = None,
+) -> dict:
     db = SessionLocal()
     try:
-        record = SharedFileRecord(
-            room_id=room_id,
+        sub = db.query(UserSubscription).filter(UserSubscription.clerk_user_id == clerk_user_id).first()
+        if sub:
+            sub.customer_email = customer_email
+            sub.plan = plan
+            sub.status = status
+            if stripe_customer_id:
+                sub.stripe_customer_id = stripe_customer_id
+            if stripe_subscription_id:
+                sub.stripe_subscription_id = stripe_subscription_id
+            if current_period_end:
+                sub.current_period_end = current_period_end
+        else:
+            sub = UserSubscription(
+                clerk_user_id=clerk_user_id,
+                customer_email=customer_email,
+                plan=plan,
+                status=status,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+                current_period_end=current_period_end,
+            )
+            db.add(sub)
+        db.commit()
+        db.refresh(sub)
+        return {
+            "clerk_user_id": sub.clerk_user_id,
+            "customer_email": sub.customer_email,
+            "plan": sub.plan,
+            "status": sub.status,
+        }
+    finally:
+        db.close()
+
+
+def record_shared_file(room_id: str, filename: str, file_url: str, file_size: int = 0, uploader: str = "Instructor") -> dict:
+    db = SessionLocal()
+    try:
+        rec = SharedFileRecord(
+            room_id=str(room_id),
             filename=filename,
             file_url=file_url,
             file_size=file_size,
             uploader=uploader,
         )
-        db.add(record)
+        db.add(rec)
         db.commit()
-        db.refresh(record)
+        db.refresh(rec)
         return {
-            "id": record.id,
-            "room_id": record.room_id,
-            "filename": record.filename,
-            "file_url": record.file_url,
-            "file_size": record.file_size,
-            "uploader": record.uploader,
-            "created_at": record.created_at.isoformat(),
+            "id": rec.id,
+            "room_id": rec.room_id,
+            "filename": rec.filename,
+            "file_url": rec.file_url,
+            "file_size": rec.file_size,
+            "uploader": rec.uploader,
+            "created_at": rec.created_at.isoformat(),
         }
     finally:
         db.close()
@@ -492,7 +1007,9 @@ def record_shared_file(room_id: str, filename: str, file_url: str, file_size: in
 def get_room_shared_files(room_id: str) -> List[dict]:
     db = SessionLocal()
     try:
-        records = db.query(SharedFileRecord).filter(SharedFileRecord.room_id == room_id).order_by(SharedFileRecord.created_at.desc()).all()
+        records = db.query(SharedFileRecord).filter(
+            SharedFileRecord.room_id == str(room_id)
+        ).order_by(SharedFileRecord.created_at.desc()).all()
         return [
             {
                 "id": r.id,
@@ -509,42 +1026,21 @@ def get_room_shared_files(room_id: str) -> List[dict]:
         db.close()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Admin & Analytics Queries
-# ──────────────────────────────────────────────────────────────────────────────
-
 def get_admin_dashboard_stats() -> dict:
     db = SessionLocal()
     try:
-        # Get all unique room IDs from messages, schedules, and polls
-        room_ids = set()
-        for r in db.query(MessageRecord.room_id).distinct():
-            room_ids.add(r[0])
-        for r in db.query(ClassSchedule.room_id).distinct():
-            room_ids.add(r[0])
-
-        room_stats = []
-        for rid in sorted(room_ids):
-            msg_count = db.query(MessageRecord).filter(MessageRecord.room_id == rid).count()
-            student_count = db.query(MessageRecord.username).filter(MessageRecord.room_id == rid).distinct().count()
-            room_stats.append({
-                "room_id": rid,
-                "message_count": msg_count,
-                "student_count": student_count,
-            })
-
+        total_rooms = db.query(Room).count()
         total_messages = db.query(MessageRecord).count()
-        total_students = db.query(MessageRecord.username).distinct().count()
+        total_doubts = db.query(MessageRecord).filter(MessageRecord.is_doubt == True).count()
         total_polls = db.query(PollRecord).count()
-        total_schedules = db.query(ClassSchedule).count()
-
+        total_attendees = db.query(AttendanceRecord.username).distinct().count()
+        
         return {
-            "rooms": room_stats,
-            "total_rooms": len(room_ids),
+            "total_rooms": total_rooms,
             "total_messages": total_messages,
-            "total_students": total_students,
+            "total_doubts": total_doubts,
             "total_polls": total_polls,
-            "total_schedules": total_schedules,
+            "total_attendees": total_attendees,
         }
     finally:
         db.close()
