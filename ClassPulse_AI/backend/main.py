@@ -56,7 +56,7 @@ def verify_room_token(token: Optional[str]) -> Optional[dict]:
 
 async def require_teacher(authorization: Optional[str] = Header(None)):
     if not authorization:
-        return {"role": "teacher", "is_host": True}
+        raise HTTPException(status_code=401, detail="Authorization header required")
     payload = verify_room_token(authorization)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired authorization token")
@@ -581,11 +581,10 @@ async def generate_livekit_token(room_id: str, req: LiveKitTokenRequest):
 @app.post("/rooms/{room_id}/polls")
 @app.post("/rooms/{room_id}/poll")
 async def create_room_poll(room_id: str, req: CreatePollRequest, authorization: Optional[str] = Header(None)):
-    if authorization:
-        await require_teacher(authorization)
+    await require_teacher(authorization)
     if len(req.options) < 2:
         return {"error": "A poll requires at least 2 options."}
-    poll_data = create_poll(room_id, req.question, req.options)
+    poll_data = await asyncio.to_thread(create_poll, room_id, req.question, req.options)
     await manager.broadcast(room_id, {
         "type": "poll_created",
         "poll": poll_data,
@@ -740,6 +739,8 @@ async def stripe_webhook_endpoint(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
     event_data = handle_webhook(payload, sig_header)
+    if "error" in event_data:
+        raise HTTPException(status_code=400, detail=f"Webhook verification error: {event_data['error']}")
     event_type = event_data.get("type")
 
     if event_type in ("checkout.session.completed", "customer.subscription.updated"):
@@ -788,8 +789,7 @@ def list_plans():
 
 @app.post("/rooms/{room_id}/files")
 async def upload_classroom_file(room_id: str, file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
-    if authorization:
-        await require_teacher(authorization)
+    await require_teacher(authorization)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
@@ -850,8 +850,9 @@ def list_classroom_files(room_id: str):
 
 
 @app.get("/admin/stats")
-def get_admin_stats():
-    return get_admin_dashboard_stats()
+async def get_admin_stats(authorization: Optional[str] = Header(None)):
+    await require_teacher(authorization)
+    return await asyncio.to_thread(get_admin_dashboard_stats)
 
 
 @app.get("/rooms/{room_id}/students")
@@ -887,7 +888,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 username = str(data.get("username", "Student")).strip()
                 participant_username = username
                 manager.register_peer(room_id, username, websocket)
-                record_attendance_join(room_id, username)
+                await asyncio.to_thread(record_attendance_join, room_id, username)
                 await manager.broadcast(room_id, {
                     "type": "system",
                     "message": f"{username} joined the lecture.",
@@ -909,7 +910,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                         manager.register_peer(room_id, username, websocket)
 
                     iso_ts = datetime.now(timezone.utc).isoformat()
-                    saved = save_message(
+                    saved = await asyncio.to_thread(
+                        save_message,
                         room_id=room_id,
                         username=username,
                         message=message_text,
@@ -942,7 +944,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 question = str(data.get("question", "")).strip()
                 options = data.get("options", [])
                 if question and len(options) >= 2:
-                    poll = create_poll(room_id, question, options)
+                    poll = await asyncio.to_thread(create_poll, room_id, question, options)
                     await manager.broadcast(room_id, {
                         "type": "poll_created",
                         "poll": poll,
@@ -954,7 +956,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 username = str(data.get("username", participant_username or "Anonymous")).strip()
                 selected = str(data.get("selected_option", "")).strip()
                 if poll_id and selected:
-                    updated_poll = record_vote(str(poll_id), username, selected)
+                    updated_poll = await asyncio.to_thread(record_vote, str(poll_id), username, selected)
                     if updated_poll:
                         await manager.broadcast(room_id, {
                             "type": "poll_update",
@@ -1044,7 +1046,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
         if participant_username:
-            record_attendance_leave(room_id, participant_username)
+            await asyncio.to_thread(record_attendance_leave, room_id, participant_username)
             await manager.broadcast(room_id, {
                 "type": "video-leave",
                 "username": participant_username,
